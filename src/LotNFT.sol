@@ -4,13 +4,22 @@ pragma solidity ^0.8.13;
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
+interface IAuctionTransferHook {
+    function onLotNFTTransfer(bytes32 lotId, address from, address to, uint256 tokenId) external;
+}
+
 contract LotNFT is ERC721 {
     error OnlyAuction();
     error MaxSupplyReached();
     error MintLimitExceeded();
+    error InvalidRarityAllocation();
 
     address public immutable auction;
+    bytes32 public immutable lotId;
     uint256 public immutable maxSupply;
+    uint256 public immutable designAQuantity;
+    uint256 public immutable designBQuantity;
+    uint256 public immutable designCQuantity;
     string private baseTokenURI;
     uint256 private nextTokenId = 1;
 
@@ -20,18 +29,34 @@ contract LotNFT is ERC721 {
     /// @param name_ Collection name shown by wallets and marketplaces.
     /// @param symbol_ Collection symbol shown by wallets and marketplaces.
     /// @param baseTokenURI_ Base URI used to build each tokenURI.
+    /// @param lotId_ Auction lot ID that owns this collection.
     /// @param maxSupply_ Maximum NFTs that can ever be minted for this lot.
+    /// @param designAQuantity_ Number of Design A NFTs allocated for this lot.
+    /// @param designBQuantity_ Number of Design B NFTs allocated for this lot.
+    /// @param designCQuantity_ Number of Design C NFTs allocated for this lot.
     /// @param auction_ Auction contract allowed to mint NFTs.
     constructor(
         string memory name_,
         string memory symbol_,
         string memory baseTokenURI_,
+        bytes32 lotId_,
         uint256 maxSupply_,
+        uint256 designAQuantity_,
+        uint256 designBQuantity_,
+        uint256 designCQuantity_,
         address auction_
     ) ERC721(name_, symbol_) {
+        if (designAQuantity_ + designBQuantity_ + designCQuantity_ != maxSupply_) {
+            revert InvalidRarityAllocation();
+        }
+
         auction = auction_;
+        lotId = lotId_;
         baseTokenURI = baseTokenURI_;
         maxSupply = maxSupply_;
+        designAQuantity = designAQuantity_;
+        designBQuantity = designBQuantity_;
+        designCQuantity = designCQuantity_;
     }
 
     /// @notice Mints one NFT to a buyer during the initial sale.
@@ -45,12 +70,12 @@ contract LotNFT is ERC721 {
 
     /// @notice Mints multiple NFTs to a buyer during the initial sale.
     /// @dev Only the Auction contract can call this; secondary transfers are not limited by this cap.
-    function mintBatch(address to, uint256 quantity) external {
+    function mintBatch(address to, uint256 quantity) external returns (uint256 lastTokenId) {
         if (msg.sender != auction) revert OnlyAuction();
         _checkMintLimit(to, quantity);
         mintedByWallet[to] += quantity;
         for (uint256 i = 0; i < quantity; i++) {
-            _mintNext(to);
+            lastTokenId = _mintNext(to);
         }
     }
 
@@ -87,5 +112,10 @@ contract LotNFT is ERC721 {
         _requireOwned(tokenId);
         if (bytes(baseTokenURI).length == 0) return "";
         return string.concat(baseTokenURI, Strings.toString(tokenId));
+    }
+
+    function _update(address to, uint256 tokenId, address auth) internal override returns (address from) {
+        from = super._update(to, tokenId, auth);
+        IAuctionTransferHook(auction).onLotNFTTransfer(lotId, from, to, tokenId);
     }
 }

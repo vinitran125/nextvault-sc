@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Script, console2} from "forge-std/Script.sol";
 import {Auction} from "../src/Auction.sol";
@@ -13,7 +13,7 @@ contract AuctionScript is Script {
 
         vm.startBroadcast();
         Auction implementation = new Auction();
-        bytes memory initData = abi.encodeCall(Auction.initialize, (IERC20Permit(usdc), admin));
+        bytes memory initData = abi.encodeCall(Auction.initialize, (IERC20(usdc), admin));
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
         vm.stopBroadcast();
 

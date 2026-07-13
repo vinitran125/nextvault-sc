@@ -17,13 +17,15 @@ contract CreateAuctionScript is Script {
             lowEstimate: vm.envUint("LOW_ESTIMATE"),
             highEstimate: vm.envUint("HIGH_ESTIMATE"),
             startingBid: vm.envUint("STARTING_BID"),
-            bidIncrement: vm.envUint("BID_INCREMENT"),
             previewDurationSeconds: vm.envUint("PREVIEW_DURATION_SECONDS"),
             auctionDurationSeconds: vm.envUint("AUCTION_DURATION_SECONDS"),
-            nftMaxSupply: vm.envUint("NFT_MAX_SUPPLY"),
+            designAQuantity: vm.envUint("DESIGN_A_QUANTITY"),
+            designBQuantity: vm.envUint("DESIGN_B_QUANTITY"),
+            designCQuantity: vm.envUint("DESIGN_C_QUANTITY"),
             nftPriceRatioBps: uint16(vm.envUint("NFT_PRICE_RATIO_BPS")),
             nftName: vm.envString("NFT_NAME"),
             nftSymbol: vm.envString("NFT_SYMBOL"),
+            thumbnailUrl: vm.envString("THUMBNAIL_URL"),
             metadataUri: vm.envString("METADATA_URI")
         });
 
