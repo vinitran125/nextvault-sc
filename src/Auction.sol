@@ -2,19 +2,27 @@
 pragma solidity ^0.8.13;
 
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {LotNFT} from "./LotNFT.sol";
 
-contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
+contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     uint256 public constant BPS_DENOMINATOR = 10_000;
+    bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
+        "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,uint256 amount,bytes32 nonce,uint256 deadline)"
+    );
 
+    mapping(bytes32 => address) private currentBidderItem;
+    mapping(bytes32 => uint256) private currentBidItem;
+    mapping(bytes32 => mapping(address => uint256)) private creditMaxBidItem;
     enum AuctionStatus {
         Preview,
         Active,
@@ -29,14 +37,17 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
         uint256 lowEstimate;
         uint256 highEstimate;
         uint256 startingBid;
-        uint256 bidIncrement;
         uint256 startTime;
         uint256 endTime;
         uint256 previewDurationSeconds;
         uint256 auctionDurationSeconds;
         uint256 nftMaxSupply;
+        uint256 designAQuantity;
+        uint256 designBQuantity;
+        uint256 designCQuantity;
         uint16 nftPriceRatioBps;
         uint256 nftPrice;
+        string thumbnailUrl;
         string metadataUri;
     }
 
@@ -46,13 +57,15 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
         uint256 lowEstimate;
         uint256 highEstimate;
         uint256 startingBid;
-        uint256 bidIncrement;
         uint256 previewDurationSeconds;
         uint256 auctionDurationSeconds;
-        uint256 nftMaxSupply;
+        uint256 designAQuantity;
+        uint256 designBQuantity;
+        uint256 designCQuantity;
         uint16 nftPriceRatioBps;
         string nftName;
         string nftSymbol;
+        string thumbnailUrl;
         string metadataUri;
     }
 
@@ -64,18 +77,29 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
         bytes32 s;
     }
 
-    struct BidState {
-        address currentBidder;
-        uint256 currentBid;
-        uint256 totalBids;
+    struct BidderState {
+        uint256 deposit;
+        bool activeMaxBid;
     }
 
-    struct BidderState {
-        uint256 maxBid;
-        uint256 deposit;
-        uint256 permitValue;
-        uint256 permitDeadline;
-        bool activeAutoBid;
+    enum ConsignmentDepositStatus {
+        None,
+        Deposited,
+        Cancelled
+    }
+
+    struct ConsignmentDepositAuthorization {
+        bytes32 itemId;
+        address consignor;
+        uint256 amount;
+        bytes32 nonce;
+        uint256 deadline;
+    }
+
+    struct ConsignmentDepositState {
+        address consignor;
+        uint256 amount;
+        ConsignmentDepositStatus status;
     }
 
     error InvalidToken();
@@ -86,6 +110,7 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
     error InvalidStartingBid();
     error InvalidAuctionDuration();
     error InvalidNftConfig();
+    error InvalidRarityAllocation();
     error AuctionNotFound();
     error AuctionAlreadyCancelled();
     error AuctionIsCancelled();
@@ -96,28 +121,59 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
     error InvalidConfig();
     error InvalidBidAmount();
     error InvalidPermitValue();
-    error BidNotIncreased();
+    error InsufficientBidAllowance(address bidder, uint256 requiredDeposit, uint256 heldDeposit, uint256 allowance);
+    error NoMaxBidDeposit();
+    error CurrentLeaderCannotWithdrawDeposit();
+    error BidModeConflict();
+    error InvalidSigner();
+    error InvalidAmount();
+    error InvalidNftCollection();
+    error InvalidBidder();
+    error AuthorizationExpired();
+    error NonceAlreadyUsed();
+    error ConsignmentDepositAlreadyExists();
+    error ConsignmentDepositNotFound();
+    error ConsignmentDepositNotActive();
+    error UnauthorizedConsignmentDepositCancel();
 
-    event AuctionCreated(bytes32 indexed lotId, bytes data);
-    event AuctionCancelled(bytes32 indexed lotId);
-    event NFTPurchased(bytes32 indexed lotId, address indexed buyer, uint256 quantity, uint256 totalPrice);
-    event BidPlaced(bytes32 indexed lotId, address indexed bidder, uint256 bidAmount, uint256 maxBid);
-    event BidStep(bytes32 indexed lotId, address indexed bidder, uint256 amount);
-    event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount);
-    event AuctionExtended(bytes32 indexed lotId, uint256 oldEndTime, uint256 newEndTime);
+    event AuctionCreated(bytes32 indexed lotId, bytes data, uint256 blockTimestamp);
+    event AuctionCancelled(bytes32 indexed lotId, uint256 blockTimestamp);
+    event NFTPurchased(
+        bytes32 indexed lotId,
+        address indexed buyer,
+        uint256 quantity,
+        uint256 totalPrice,
+        uint256 lastTokenId,
+        uint256 blockTimestamp
+    );
+    event BidPlaced(bytes32 indexed lotId, address indexed bidder, uint256 bidAmount, uint256 blockTimestamp);
+    event BidStep(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
+    event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
+    event MaxBidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
+    event LotNFTTransferred(
+        bytes32 indexed lotId,
+        address indexed nftCollection,
+        address indexed from,
+        address to,
+        uint256 tokenId,
+        uint256 blockTimestamp
+    );
+    event ConsignmentDepositCreated(
+        bytes32 indexed itemId, address indexed consignor, address indexed token, uint256 amount, uint256 blockTimestamp
+    );
+    event ConsignmentDepositCancelled(
+        bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, uint256 blockTimestamp
+    );
 
-    IERC20 public usdc;
-    IERC20Permit public usdcPermit;
-
-    uint16 public buyerPremiumBps;
-    uint16 public depositBps;
-    uint256 public antiSnipeWindowSeconds;
+    IERC20 public token;
+    uint256 private tokenDecimal;
 
     mapping(bytes32 => AuctionConfig) private auctions;
-    mapping(bytes32 => BidState) private bidStates;
     mapping(bytes32 => bool) public auctionExists;
     mapping(bytes32 => bool) public cancelledAuctions;
     mapping(bytes32 => mapping(address => BidderState)) private bidderStates;
+    mapping(bytes32 => ConsignmentDepositState) private consignmentDeposits;
+    mapping(bytes32 => bool) public usedConsignmentDepositNonces;
     bytes32[] private lotIds;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -125,16 +181,14 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
         _disableInitializers();
     }
 
-    function initialize(IERC20Permit usdc_, address admin) external initializer {
-        if (address(usdc_) == address(0)) revert InvalidToken();
+    function initialize(IERC20 token_, address admin) external initializer {
+        if (address(token_) == address(0)) revert InvalidToken();
         if (admin == address(0)) revert InvalidConfig();
-        usdc = IERC20(address(usdc_));
-        usdcPermit = usdc_;
-        buyerPremiumBps = 1_000;
-        depositBps = 1_000;
-        antiSnipeWindowSeconds = 5 minutes;
+        token = token_;
+        tokenDecimal = 10 ** IERC20Metadata(address(token_)).decimals();
 
         __AccessControl_init();
+        __EIP712_init("NextVaultAuction", "1");
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(OPERATOR_ROLE, admin);
     }
@@ -153,20 +207,28 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
         if (params.startingBid == 0 || params.startingBid < params.lowEstimate) {
             revert InvalidStartingBid();
         }
-        if (params.bidIncrement == 0) revert InvalidStartingBid();
-        if ((params.startingBid - params.lowEstimate) % params.bidIncrement != 0) revert InvalidStartingBid();
         if (params.auctionDurationSeconds == 0) revert InvalidAuctionDuration();
-        if (params.nftMaxSupply == 0 || params.nftPriceRatioBps == 0) {
-            revert InvalidNftConfig();
-        }
+        if (params.nftPriceRatioBps == 0) revert InvalidNftConfig();
 
-        uint256 nftPrice = (params.lowEstimate * params.nftPriceRatioBps) / BPS_DENOMINATOR / params.nftMaxSupply;
+        uint256 nftMaxSupply = params.designAQuantity + params.designBQuantity + params.designCQuantity;
+        if (nftMaxSupply == 0) revert InvalidRarityAllocation();
+
+        uint256 nftPrice = (params.lowEstimate * params.nftPriceRatioBps) / BPS_DENOMINATOR / nftMaxSupply;
         if (nftPrice == 0) revert InvalidNftConfig();
 
         uint256 startTime = block.timestamp + params.previewDurationSeconds;
         uint256 endTime = startTime + params.auctionDurationSeconds;
-        LotNFT nft =
-            new LotNFT(params.nftName, params.nftSymbol, params.metadataUri, params.nftMaxSupply, address(this));
+        LotNFT nft = new LotNFT(
+            params.nftName,
+            params.nftSymbol,
+            params.metadataUri,
+            params.lotId,
+            nftMaxSupply,
+            params.designAQuantity,
+            params.designBQuantity,
+            params.designCQuantity,
+            address(this)
+        );
 
         auctions[params.lotId] = AuctionConfig({
             lotId: params.lotId,
@@ -175,20 +237,23 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
             lowEstimate: params.lowEstimate,
             highEstimate: params.highEstimate,
             startingBid: params.startingBid,
-            bidIncrement: params.bidIncrement,
             startTime: startTime,
             endTime: endTime,
             previewDurationSeconds: params.previewDurationSeconds,
             auctionDurationSeconds: params.auctionDurationSeconds,
-            nftMaxSupply: params.nftMaxSupply,
+            nftMaxSupply: nftMaxSupply,
+            designAQuantity: params.designAQuantity,
+            designBQuantity: params.designBQuantity,
+            designCQuantity: params.designCQuantity,
             nftPriceRatioBps: params.nftPriceRatioBps,
             nftPrice: nftPrice,
+            thumbnailUrl: params.thumbnailUrl,
             metadataUri: params.metadataUri
         });
         auctionExists[params.lotId] = true;
         lotIds.push(params.lotId);
 
-        emit AuctionCreated(params.lotId, abi.encode(auctions[params.lotId]));
+        emit AuctionCreated(params.lotId, abi.encode(auctions[params.lotId]), block.timestamp);
 
         return params.lotId;
     }
@@ -206,122 +271,151 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
         if (quantity == 0) revert InvalidQuantity();
 
         uint256 totalPrice = auction.nftPrice * quantity;
-        usdc.safeTransferFrom(msg.sender, address(this), totalPrice);
+        token.safeTransferFrom(msg.sender, address(this), totalPrice);
 
-        LotNFT(auction.nftCollection).mintBatch(msg.sender, quantity);
+        uint256 lastTokenId = LotNFT(auction.nftCollection).mintBatch(msg.sender, quantity);
 
-        emit NFTPurchased(lotId, msg.sender, quantity, totalPrice);
+        emit NFTPurchased(lotId, msg.sender, quantity, totalPrice, lastTokenId, block.timestamp);
     }
 
-    function placeBid(bytes32 lotId, uint256 bidAmount, PermitData calldata permit) external {
+    function placeBid(bytes32 lotId, uint256 amount) external {
+        if (bidderStates[lotId][msg.sender].activeMaxBid) revert BidModeConflict();
         if (!auctionExists[lotId]) revert AuctionNotFound();
-        AuctionConfig memory auction = auctions[lotId];
-
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
+        AuctionConfig memory auction = auctions[lotId];
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
         {
             revert AuctionNotActive();
         }
-
-        uint256 startingBid = auction.startingBid;
-        uint256 bidIncrement = auction.bidIncrement;
-
         if (LotNFT(auction.nftCollection).balanceOf(msg.sender) == 0) revert NotEligibleToBid();
 
-        BidState storage state = bidStates[lotId];
-        uint256 nextBid = state.currentBid == 0 ? startingBid : state.currentBid + bidIncrement;
-        if (bidAmount < nextBid) revert InvalidBidAmount();
-        if ((bidAmount - startingBid) % bidIncrement != 0) revert InvalidBidAmount();
+        if (amount < auction.startingBid) revert InvalidBidAmount();
+        if (amount != auction.startingBid && !_isBidOnLadder(amount)) revert InvalidBidAmount();
+        if (currentBidItem[lotId] != 0 && amount <= currentBidItem[lotId]) revert InvalidBidAmount();
 
-        if (bidderStates[lotId][msg.sender].maxBid != 0 && bidAmount <= bidderStates[lotId][msg.sender].maxBid) {
-            bidderStates[lotId][msg.sender].activeAutoBid = true;
-            revert BidNotIncreased();
-        }
+        uint256 depositAmount = amount / 10;
+        token.safeTransferFrom(msg.sender, address(this), depositAmount);
+        _refundBid(lotId);
 
-        {
-            uint256 requiredDeposit = depositRequired(bidAmount);
-
-            if (permit.value < bidAmount - requiredDeposit + buyerPremium(bidAmount)) {
-                revert InvalidPermitValue();
-            }
-
-            uint256 currentDeposit = bidderStates[lotId][msg.sender].deposit;
-            if (requiredDeposit > currentDeposit) {
-                uint256 additionalDeposit = requiredDeposit - currentDeposit;
-                bidderStates[lotId][msg.sender].deposit = requiredDeposit;
-                usdc.safeTransferFrom(msg.sender, address(this), additionalDeposit);
-            }
-        }
-
-        usdcPermit.permit(msg.sender, address(this), permit.value, permit.deadline, permit.v, permit.r, permit.s);
-        bidderStates[lotId][msg.sender].permitValue = permit.value;
-        bidderStates[lotId][msg.sender].permitDeadline = permit.deadline;
-        bidderStates[lotId][msg.sender].maxBid = bidAmount;
-        bidderStates[lotId][msg.sender].activeAutoBid = true;
-
-        uint256 previousBid = state.currentBid;
-
-        if (state.currentBidder == address(0)) {
-            state.currentBidder = msg.sender;
-            state.currentBid = startingBid;
-            state.totalBids += 1;
-            emit BidPlaced(lotId, msg.sender, startingBid, bidAmount);
-        } else if (state.currentBidder == msg.sender) {
-            emit BidPlaced(lotId, msg.sender, state.currentBid, bidAmount);
-        } else {
-            address previousLeader = state.currentBidder;
-            uint256 previousMax = bidderStates[lotId][previousLeader].maxBid;
-
-            if (bidAmount <= previousMax) {
-                uint256 nextAfterIncoming = bidAmount + bidIncrement;
-                state.currentBid = bidAmount == previousMax
-                    ? previousMax
-                    : (previousMax < nextAfterIncoming ? previousMax : nextAfterIncoming);
-                _refundDeposit(lotId, msg.sender);
-            } else {
-                uint256 nextAfterPreviousMax = previousMax + bidIncrement;
-                state.currentBid = bidAmount < nextAfterPreviousMax ? bidAmount : nextAfterPreviousMax;
-                state.currentBidder = msg.sender;
-                bidderStates[lotId][previousLeader].activeAutoBid = false;
-                _refundDeposit(lotId, previousLeader);
-            }
-
-            state.totalBids += 1;
-        }
-
-        if (state.currentBid > previousBid) {
-            uint256 step = previousBid == 0 ? state.currentBid : previousBid + bidIncrement;
-            while (step < state.currentBid) {
-                emit BidStep(lotId, state.currentBidder, step);
-                step += bidIncrement;
-            }
-            emit BidStep(lotId, state.currentBidder, state.currentBid);
-        }
-
-        if (block.timestamp + antiSnipeWindowSeconds >= auction.endTime) {
-            uint256 oldEndTime = auction.endTime;
-            auctions[lotId].endTime = block.timestamp + antiSnipeWindowSeconds;
-            emit AuctionExtended(lotId, oldEndTime, auctions[lotId].endTime);
-        }
+        bidderStates[lotId][msg.sender].deposit = depositAmount;
+        bidderStates[lotId][msg.sender].activeMaxBid = false;
+        currentBidderItem[lotId] = msg.sender;
+        currentBidItem[lotId] = amount;
+        emit BidPlaced(lotId, msg.sender, amount, block.timestamp);
     }
 
-    function cancelAuction(bytes32 lotId) external onlyRole(OPERATOR_ROLE) {
+    function placeBidFor(bytes32 lotId, address bidder, uint256 amount) external onlyRole(OPERATOR_ROLE) {
+        if (bidderStates[lotId][bidder].deposit > 0 && !bidderStates[lotId][bidder].activeMaxBid) {
+            revert BidModeConflict();
+        }
+
         if (!auctionExists[lotId]) revert AuctionNotFound();
-        if (cancelledAuctions[lotId]) {
-            revert AuctionAlreadyCancelled();
+        if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
+        AuctionConfig memory auction = auctions[lotId];
+        if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
+        {
+            revert AuctionNotActive();
+        }
+        if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
+
+        if (amount < auction.startingBid) revert InvalidBidAmount();
+        if (amount != auction.startingBid && !_isBidOnLadder(amount)) revert InvalidBidAmount();
+        if (currentBidItem[lotId] != 0 && amount <= currentBidItem[lotId]) revert InvalidBidAmount();
+
+        uint256 depositAmount = amount / 10 - creditMaxBidItem[lotId][bidder];
+        token.safeTransferFrom(bidder, address(this), depositAmount);
+        _refundBid(lotId);
+
+        bidderStates[lotId][bidder].deposit += depositAmount;
+        bidderStates[lotId][bidder].activeMaxBid = true;
+        currentBidderItem[lotId] = bidder;
+        currentBidItem[lotId] = amount;
+        creditMaxBidItem[lotId][bidder] += depositAmount;
+        emit BidPlaced(lotId, bidder, amount, block.timestamp);
+    }
+
+    function _refundBid(bytes32 lotId) internal {
+        address currentBidder = currentBidderItem[lotId];
+        if (currentBidder == address(0)) return;
+
+        uint256 amount = bidderStates[lotId][currentBidder].deposit;
+        if (amount == 0) return;
+
+        if (bidderStates[lotId][currentBidder].activeMaxBid) return;
+
+        bidderStates[lotId][currentBidder].deposit = 0;
+        token.safeTransfer(currentBidder, amount);
+        emit BidRefunded(lotId, currentBidder, amount, block.timestamp);
+    }
+
+    function refundMaxBid(bytes32 lotId, address bidder) external onlyRole(OPERATOR_ROLE) {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (currentBidderItem[lotId] == bidder) revert CurrentLeaderCannotWithdrawDeposit();
+
+        BidderState storage bidderState = bidderStates[lotId][bidder];
+        uint256 amount = creditMaxBidItem[lotId][bidder];
+        if (!bidderState.activeMaxBid || amount == 0) revert NoMaxBidDeposit();
+        creditMaxBidItem[lotId][bidder] = 0;
+        bidderState.deposit = 0;
+        bidderState.activeMaxBid = false;
+        token.safeTransfer(bidder, amount);
+
+        emit MaxBidRefunded(lotId, bidder, amount, block.timestamp);
+    }
+
+    //    function cancelAuction(bytes32 lotId) external onlyRole(OPERATOR_ROLE) {
+    //        if (!auctionExists[lotId]) revert AuctionNotFound();
+    //        if (cancelledAuctions[lotId]) {
+    //            revert AuctionAlreadyCancelled();
+    //        }
+    //
+    //        cancelledAuctions[lotId] = true;
+    //        emit AuctionCancelled(lotId, block.timestamp);
+    //    }
+    //
+    function onLotNFTTransfer(bytes32 lotId, address from, address to, uint256 tokenId) external {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (auctions[lotId].nftCollection != msg.sender) revert InvalidNftCollection();
+
+        emit LotNFTTransferred(lotId, msg.sender, from, to, tokenId, block.timestamp);
+    }
+
+    function depositConsignment(ConsignmentDepositAuthorization calldata authorization, bytes calldata signature)
+        external
+    {
+        if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
+        if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
+        if (authorization.amount == 0) revert InvalidAmount();
+        if (usedConsignmentDepositNonces[authorization.nonce]) revert NonceAlreadyUsed();
+        if (consignmentDeposits[authorization.itemId].status != ConsignmentDepositStatus.None) {
+            revert ConsignmentDepositAlreadyExists();
         }
 
-        cancelledAuctions[lotId] = true;
-        emit AuctionCancelled(lotId);
+        address signer = ECDSA.recover(_hashConsignmentDepositAuthorization(authorization), signature);
+        if (!hasRole(DEFAULT_ADMIN_ROLE, signer)) revert InvalidSigner();
+
+        usedConsignmentDepositNonces[authorization.nonce] = true;
+        consignmentDeposits[authorization.itemId] = ConsignmentDepositState({
+            consignor: authorization.consignor, amount: authorization.amount, status: ConsignmentDepositStatus.Deposited
+        });
+
+        token.safeTransferFrom(msg.sender, address(this), authorization.amount);
+
+        emit ConsignmentDepositCreated(
+            authorization.itemId, authorization.consignor, address(token), authorization.amount, block.timestamp
+        );
     }
 
-    function setBuyerPremiumBps(uint16 buyerPremiumBps_) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (buyerPremiumBps_ > BPS_DENOMINATOR) revert InvalidConfig();
-        buyerPremiumBps = buyerPremiumBps_;
-    }
+    function cancelConsignmentDeposit(bytes32 itemId) external {
+        ConsignmentDepositState storage state = consignmentDeposits[itemId];
+        if (state.status == ConsignmentDepositStatus.None) revert ConsignmentDepositNotFound();
+        if (state.status != ConsignmentDepositStatus.Deposited) revert ConsignmentDepositNotActive();
+        if (state.consignor != msg.sender) revert UnauthorizedConsignmentDepositCancel();
 
-    function setAntiSnipeWindowSeconds(uint256 antiSnipeWindowSeconds_) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        antiSnipeWindowSeconds = antiSnipeWindowSeconds_;
+        state.status = ConsignmentDepositStatus.Cancelled;
+        token.safeTransfer(state.consignor, state.amount);
+
+        emit ConsignmentDepositCancelled(itemId, msg.sender, state.amount, block.timestamp);
     }
 
     function getAuction(bytes32 lotId) external view returns (AuctionConfig memory) {
@@ -338,73 +432,23 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
             _currentStatus(auctions[lotId].startTime, auctions[lotId].previewDurationSeconds, auctions[lotId].endTime);
     }
 
-    function nextValidBid(bytes32 lotId) external view returns (uint256) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        if (bidStates[lotId].currentBid == 0) return auctions[lotId].startingBid;
-        return bidStates[lotId].currentBid + auctions[lotId].bidIncrement;
-    }
+    function _hashConsignmentDepositAuthorization(ConsignmentDepositAuthorization calldata authorization)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH,
+                authorization.itemId,
+                authorization.consignor,
+                authorization.amount,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
 
-    function isValidBidAmount(bytes32 lotId, uint256 amount) external view returns (bool) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        uint256 nextBid = bidStates[lotId].currentBid == 0
-            ? auctions[lotId].startingBid
-            : bidStates[lotId].currentBid + auctions[lotId].bidIncrement;
-        return amount >= nextBid && (amount - auctions[lotId].startingBid) % auctions[lotId].bidIncrement == 0;
-    }
-
-    function buyerPremium(uint256 amount) public view returns (uint256) {
-        return (amount * buyerPremiumBps) / BPS_DENOMINATOR;
-    }
-
-    function depositRequired(uint256 amount) public view returns (uint256) {
-        return (amount * depositBps) / BPS_DENOMINATOR;
-    }
-
-    function getBidState(bytes32 lotId) external view returns (BidState memory) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        return bidStates[lotId];
-    }
-
-    function getBidderState(bytes32 lotId, address bidder) external view returns (BidderState memory) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        return bidderStates[lotId][bidder];
-    }
-
-    function initialMintLimit(bytes32 lotId) external view returns (uint256) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        return LotNFT(auctions[lotId].nftCollection).initialMintLimit();
-    }
-
-    function mintedByWallet(bytes32 lotId, address wallet) external view returns (uint256) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        return LotNFT(auctions[lotId].nftCollection).mintedByWallet(wallet);
-    }
-
-    function isEligibleToBid(bytes32 lotId, address bidder) external view returns (bool) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        return LotNFT(auctions[lotId].nftCollection).balanceOf(bidder) > 0;
-    }
-
-    function nftCollectionOf(bytes32 lotId) external view returns (address) {
-        if (!auctionExists[lotId]) revert AuctionNotFound();
-        return auctions[lotId].nftCollection;
-    }
-
-    function lotCount() external view returns (uint256) {
-        return lotIds.length;
-    }
-
-    function lotIdAt(uint256 index) external view returns (bytes32) {
-        return lotIds[index];
-    }
-
-    function _refundDeposit(bytes32 lotId, address bidder) internal {
-        uint256 amount = bidderStates[lotId][bidder].deposit;
-        if (amount == 0) return;
-        bidderStates[lotId][bidder].deposit = 0;
-        bidderStates[lotId][bidder].activeAutoBid = false;
-        usdc.safeTransfer(bidder, amount);
-        emit BidRefunded(lotId, bidder, amount);
+        return _hashTypedDataV4(structHash);
     }
 
     function _currentStatus(uint256 startTime, uint256 previewDurationSeconds, uint256 endTime)
@@ -419,5 +463,39 @@ contract Auction is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
             return AuctionStatus.Active;
         }
         return AuctionStatus.Preview;
+    }
+
+    function _isBidOnLadder(uint256 amount) internal view returns (bool) {
+        uint256 offset;
+
+        if (amount < 2_000 * tokenDecimal) return amount % (100 * tokenDecimal) == 0;
+        if (amount < 5_000 * tokenDecimal) {
+            offset = amount % (1_000 * tokenDecimal);
+            return
+                offset == 0 || offset == 200 * tokenDecimal || offset == 500 * tokenDecimal
+                    || offset == 800 * tokenDecimal;
+        }
+        if (amount < 10_000 * tokenDecimal) return amount % (500 * tokenDecimal) == 0;
+        if (amount < 20_000 * tokenDecimal) return amount % (1_000 * tokenDecimal) == 0;
+        if (amount < 50_000 * tokenDecimal) {
+            offset = amount % (10_000 * tokenDecimal);
+            return offset == 0 || offset == 2_000 * tokenDecimal || offset == 5_000 * tokenDecimal
+                || offset == 8_000 * tokenDecimal;
+        }
+        if (amount < 100_000 * tokenDecimal) return amount % (5_000 * tokenDecimal) == 0;
+        if (amount < 200_000 * tokenDecimal) return amount % (10_000 * tokenDecimal) == 0;
+        if (amount < 500_000 * tokenDecimal) {
+            offset = amount % (100_000 * tokenDecimal);
+            return offset == 0 || offset == 20_000 * tokenDecimal || offset == 50_000 * tokenDecimal
+                || offset == 80_000 * tokenDecimal;
+        }
+        if (amount < 1_000_000 * tokenDecimal) return amount % (50_000 * tokenDecimal) == 0;
+        if (amount < 2_000_000 * tokenDecimal) return amount % (100_000 * tokenDecimal) == 0;
+        if (amount < 5_000_000 * tokenDecimal) {
+            offset = amount % (1_000_000 * tokenDecimal);
+            return offset == 0 || offset == 200_000 * tokenDecimal || offset == 500_000 * tokenDecimal
+                || offset == 800_000 * tokenDecimal;
+        }
+        return amount % (500_000 * tokenDecimal) == 0;
     }
 }

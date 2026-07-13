@@ -18,13 +18,15 @@ fi
 : "${LOW_ESTIMATE:?LOW_ESTIMATE is required}"
 : "${HIGH_ESTIMATE:?HIGH_ESTIMATE is required}"
 : "${STARTING_BID:?STARTING_BID is required}"
-: "${BID_INCREMENT:?BID_INCREMENT is required}"
 : "${PREVIEW_DURATION_SECONDS:?PREVIEW_DURATION_SECONDS is required}"
 : "${AUCTION_DURATION_SECONDS:?AUCTION_DURATION_SECONDS is required}"
-: "${NFT_MAX_SUPPLY:?NFT_MAX_SUPPLY is required}"
+: "${DESIGN_A_QUANTITY:?DESIGN_A_QUANTITY is required}"
+: "${DESIGN_B_QUANTITY:?DESIGN_B_QUANTITY is required}"
+: "${DESIGN_C_QUANTITY:?DESIGN_C_QUANTITY is required}"
 : "${NFT_PRICE_RATIO_BPS:?NFT_PRICE_RATIO_BPS is required}"
 : "${NFT_NAME:?NFT_NAME is required}"
 : "${NFT_SYMBOL:?NFT_SYMBOL is required}"
+: "${THUMBNAIL_URL:?THUMBNAIL_URL is required}"
 : "${METADATA_URI:?METADATA_URI is required}"
 
 forge script "script/CreateAuction.s.sol:CreateAuctionScript" \
