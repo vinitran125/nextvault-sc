@@ -58,7 +58,7 @@ contract AuctionPlaceBidTest is Test {
         assertEq(token.balanceOf(bidderA), 100_000 * USDC - NFT_PRICE - STARTING_BID / 10);
     }
 
-    function testPlaceBidCanStartAboveStartingBidWhenAmountIsOnLadder() external {
+    function testPlaceBidRevertsWhenStartingAboveStartingBidEvenOnLadder() external {
         _createActiveAuction();
         _buyNft(bidderA, 1);
 
@@ -66,13 +66,9 @@ contract AuctionPlaceBidTest is Test {
         vm.prank(bidderA);
         token.approve(address(auction), bidAmount / 10);
 
-        vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, bidAmount, block.timestamp);
-
         vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidBidAmount.selector);
         auction.placeBid(LOT_ID, bidAmount);
-
-        assertEq(token.balanceOf(address(auction)), NFT_PRICE + bidAmount / 10);
     }
 
     function testPlaceBidRefundsPreviousNormalBidder() external {
@@ -165,7 +161,7 @@ contract AuctionPlaceBidTest is Test {
         _createActiveAuction();
         _buyNft(bidderA, 1);
 
-        uint256 operatorBid = 11_000 * USDC;
+        uint256 operatorBid = STARTING_BID;
         _approveBidDeposit(bidderA, operatorBid);
 
         vm.prank(operator);

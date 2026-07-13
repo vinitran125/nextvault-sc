@@ -59,8 +59,8 @@ contract AuctionMixedBidFlowTest is Test {
         uint256 aliceBid = 10_000 * USDC;
         uint256 bobBid = 11_000 * USDC;
         uint256 carolBid = 12_000 * USDC;
-        uint256 daveBid = 15_000 * USDC;
-        uint256 bobSecondBid = 20_000 * USDC;
+        uint256 daveBid = 13_000 * USDC;
+        uint256 bobSecondBid = 14_000 * USDC;
 
         assertEq(nft.balanceOf(alice), 1);
         assertEq(nft.balanceOf(bob), 1);

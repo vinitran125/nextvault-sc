@@ -118,8 +118,8 @@ contract AuctionBidEdgeCasesTest is Test {
     }
 
     function testManualBidAfterActiveMaxBidDoesNotRefundMaxBidderImmediately() external {
-        uint256 bobMaxBid = 11_000 * USDC;
-        uint256 carolBid = 12_000 * USDC;
+        uint256 bobMaxBid = STARTING_BID;
+        uint256 carolBid = 11_000 * USDC;
 
         _approveBidDeposit(bob, bobMaxBid);
         vm.prank(operator);
@@ -141,7 +141,7 @@ contract AuctionBidEdgeCasesTest is Test {
     }
 
     function testDifferentBidTypesSameAmountInSameBlockSecondReverts() external {
-        uint256 bobMaxBid = 11_000 * USDC;
+        uint256 bobMaxBid = STARTING_BID;
 
         _approveBidDeposit(bob, bobMaxBid);
         vm.prank(operator);
