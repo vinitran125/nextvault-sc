@@ -289,9 +289,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         }
         if (LotNFT(auction.nftCollection).balanceOf(msg.sender) == 0) revert NotEligibleToBid();
 
-        if (amount < auction.startingBid) revert InvalidBidAmount();
-        if (amount != auction.startingBid && !_isBidOnLadder(amount)) revert InvalidBidAmount();
-        if (currentBidItem[lotId] != 0 && amount <= currentBidItem[lotId]) revert InvalidBidAmount();
+        uint256 currentBid = currentBidItem[lotId];
+        uint256 expectedBid = currentBid == 0 ? auction.startingBid : currentBid + _bidIncrementFor(currentBid);
+        if (amount != expectedBid) revert InvalidBidAmount();
 
         uint256 depositAmount = amount / 10;
         token.safeTransferFrom(msg.sender, address(this), depositAmount);
@@ -318,9 +318,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         }
         if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
 
-        if (amount < auction.startingBid) revert InvalidBidAmount();
-        if (amount != auction.startingBid && !_isBidOnLadder(amount)) revert InvalidBidAmount();
-        if (currentBidItem[lotId] != 0 && amount <= currentBidItem[lotId]) revert InvalidBidAmount();
+        uint256 currentBid = currentBidItem[lotId];
+        uint256 expectedBid = currentBid == 0 ? auction.startingBid : currentBid + _bidIncrementFor(currentBid);
+        if (amount != expectedBid) revert InvalidBidAmount();
 
         uint256 depositAmount = amount / 10 - creditMaxBidItem[lotId][bidder];
         token.safeTransferFrom(bidder, address(this), depositAmount);
@@ -465,37 +465,44 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return AuctionStatus.Preview;
     }
 
-    function _isBidOnLadder(uint256 amount) internal view returns (bool) {
+    function _bidIncrementFor(uint256 amount) internal view returns (uint256) {
         uint256 offset;
 
-        if (amount < 2_000 * tokenDecimal) return amount % (100 * tokenDecimal) == 0;
+        if (amount < 2_000 * tokenDecimal) return 100 * tokenDecimal;
         if (amount < 5_000 * tokenDecimal) {
             offset = amount % (1_000 * tokenDecimal);
-            return
-                offset == 0 || offset == 200 * tokenDecimal || offset == 500 * tokenDecimal
-                    || offset == 800 * tokenDecimal;
+            if (offset == 0) return 200 * tokenDecimal;
+            if (offset == 200 * tokenDecimal) return 300 * tokenDecimal;
+            if (offset == 500 * tokenDecimal) return 300 * tokenDecimal;
+            return 200 * tokenDecimal;
         }
-        if (amount < 10_000 * tokenDecimal) return amount % (500 * tokenDecimal) == 0;
-        if (amount < 20_000 * tokenDecimal) return amount % (1_000 * tokenDecimal) == 0;
+        if (amount < 10_000 * tokenDecimal) return 500 * tokenDecimal;
+        if (amount < 20_000 * tokenDecimal) return 1_000 * tokenDecimal;
         if (amount < 50_000 * tokenDecimal) {
             offset = amount % (10_000 * tokenDecimal);
-            return offset == 0 || offset == 2_000 * tokenDecimal || offset == 5_000 * tokenDecimal
-                || offset == 8_000 * tokenDecimal;
+            if (offset == 0) return 2_000 * tokenDecimal;
+            if (offset == 2_000 * tokenDecimal) return 3_000 * tokenDecimal;
+            if (offset == 5_000 * tokenDecimal) return 3_000 * tokenDecimal;
+            return 2_000 * tokenDecimal;
         }
-        if (amount < 100_000 * tokenDecimal) return amount % (5_000 * tokenDecimal) == 0;
-        if (amount < 200_000 * tokenDecimal) return amount % (10_000 * tokenDecimal) == 0;
+        if (amount < 100_000 * tokenDecimal) return 5_000 * tokenDecimal;
+        if (amount < 200_000 * tokenDecimal) return 10_000 * tokenDecimal;
         if (amount < 500_000 * tokenDecimal) {
             offset = amount % (100_000 * tokenDecimal);
-            return offset == 0 || offset == 20_000 * tokenDecimal || offset == 50_000 * tokenDecimal
-                || offset == 80_000 * tokenDecimal;
+            if (offset == 0) return 20_000 * tokenDecimal;
+            if (offset == 20_000 * tokenDecimal) return 30_000 * tokenDecimal;
+            if (offset == 50_000 * tokenDecimal) return 30_000 * tokenDecimal;
+            return 20_000 * tokenDecimal;
         }
-        if (amount < 1_000_000 * tokenDecimal) return amount % (50_000 * tokenDecimal) == 0;
-        if (amount < 2_000_000 * tokenDecimal) return amount % (100_000 * tokenDecimal) == 0;
+        if (amount < 1_000_000 * tokenDecimal) return 50_000 * tokenDecimal;
+        if (amount < 2_000_000 * tokenDecimal) return 100_000 * tokenDecimal;
         if (amount < 5_000_000 * tokenDecimal) {
             offset = amount % (1_000_000 * tokenDecimal);
-            return offset == 0 || offset == 200_000 * tokenDecimal || offset == 500_000 * tokenDecimal
-                || offset == 800_000 * tokenDecimal;
+            if (offset == 0) return 200_000 * tokenDecimal;
+            if (offset == 200_000 * tokenDecimal) return 300_000 * tokenDecimal;
+            if (offset == 500_000 * tokenDecimal) return 300_000 * tokenDecimal;
+            return 200_000 * tokenDecimal;
         }
-        return amount % (500_000 * tokenDecimal) == 0;
+        return 500_000 * tokenDecimal;
     }
 }

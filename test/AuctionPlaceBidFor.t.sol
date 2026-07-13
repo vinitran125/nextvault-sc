@@ -71,8 +71,8 @@ contract AuctionPlaceBidForTest is Test {
         _createActiveAuction();
         _buyNft(bidderA, 1);
 
-        uint256 firstBid = 11_000 * USDC;
-        uint256 secondBid = 12_000 * USDC;
+        uint256 firstBid = STARTING_BID;
+        uint256 secondBid = 11_000 * USDC;
 
         vm.prank(bidderA);
         token.approve(address(auction), secondBid / 10);
@@ -117,8 +117,8 @@ contract AuctionPlaceBidForTest is Test {
         _buyNft(bidderA, 1);
         _buyNft(bidderB, 1);
 
-        uint256 firstBid = 11_000 * USDC;
-        uint256 secondBid = 12_000 * USDC;
+        uint256 firstBid = STARTING_BID;
+        uint256 secondBid = 11_000 * USDC;
         _approveBidDeposit(bidderA, firstBid);
         _approveBidDeposit(bidderB, secondBid);
 
@@ -216,8 +216,8 @@ contract AuctionPlaceBidForTest is Test {
         _buyNft(bidderA, 1);
         _buyNft(bidderB, 1);
 
-        uint256 firstBid = 11_000 * USDC;
-        uint256 secondBid = 12_000 * USDC;
+        uint256 firstBid = STARTING_BID;
+        uint256 secondBid = 11_000 * USDC;
         _approveBidDeposit(bidderA, firstBid);
         _approveBidDeposit(bidderB, secondBid);
 
@@ -239,8 +239,8 @@ contract AuctionPlaceBidForTest is Test {
         _buyNft(bidderA, 1);
         _buyNft(bidderB, 1);
 
-        uint256 firstBid = 11_000 * USDC;
-        uint256 secondBid = 12_000 * USDC;
+        uint256 firstBid = STARTING_BID;
+        uint256 secondBid = 11_000 * USDC;
         _approveBidDeposit(bidderA, firstBid);
         _approveBidDeposit(bidderB, secondBid);
 
