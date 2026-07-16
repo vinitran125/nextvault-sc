@@ -22,9 +22,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 designAQuantity,uint256 designBQuantity,uint256 designCQuantity,uint16 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
     );
-    bytes32 public constant CONSIGNMENT_DEPOSIT_REFUND_AUTHORIZATION_TYPEHASH = keccak256(
-        "ConsignmentDepositRefundAuthorization(bytes32 itemId,bool isApproved,bytes32 nonce,uint256 deadline)"
-    );
 
     enum AuctionStatus {
         Preview,
@@ -84,13 +81,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         bytes32 itemId;
         address consignor;
         uint256 amount;
-        bytes32 nonce;
-        uint256 deadline;
-    }
-
-    struct ConsignmentDepositRefundAuthorization {
-        bytes32 itemId;
-        bool isApproved;
         bytes32 nonce;
         uint256 deadline;
     }
@@ -156,12 +146,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, uint256 blockTimestamp
     );
     event ConsignmentDepositRefunded(
-        bytes32 indexed itemId,
-        address indexed consignor,
-        uint256 refundAmount,
-        bool isApproved,
-        bytes32 nonce,
-        uint256 blockTimestamp
+        bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, bool isApproved, uint256 blockTimestamp
     );
 
     IERC20 public token;
@@ -433,29 +418,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit ConsignmentDepositCancelled(itemId, msg.sender, amount, block.timestamp);
     }
 
-    function refundConsignmentDeposit(
-        ConsignmentDepositRefundAuthorization calldata authorization,
-        bytes calldata signature
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
-        if (usedNonces[authorization.nonce]) revert NonceAlreadyUsed();
-        if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.Deposited) {
-            revert InvalidItemDepositStatus();
-        }
+    function refundConsignmentDeposit(bytes32 itemId, bool isApproved) external onlyRole(OPERATOR_ROLE) {
+        if (itemDepositStatus[itemId] != ItemDepositStatus.Deposited) revert InvalidItemDepositStatus();
 
-        address signer = ECDSA.recover(_hashConsignmentDepositRefundAuthorization(authorization), signature);
-        if (!hasRole(OPERATOR_ROLE, signer)) revert InvalidSigner();
-
-        usedNonces[authorization.nonce] = true;
-
-        address consignor = itemDepositConsignor[authorization.itemId];
-        uint256 amount = itemDepositAmount[authorization.itemId];
-        itemDepositStatus[authorization.itemId] = ItemDepositStatus.Refunded;
+        address consignor = itemDepositConsignor[itemId];
+        uint256 amount = itemDepositAmount[itemId];
+        itemDepositStatus[itemId] = ItemDepositStatus.Refunded;
         token.safeTransfer(consignor, amount);
 
-        emit ConsignmentDepositRefunded(
-            authorization.itemId, consignor, amount, authorization.isApproved, authorization.nonce, block.timestamp
-        );
+        emit ConsignmentDepositRefunded(itemId, consignor, amount, isApproved, block.timestamp);
     }
 
     function getAuction(bytes32 lotId) external view returns (AuctionConfig memory) {
@@ -516,24 +487,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 keccak256(bytes(params.metadataUri)),
                 nonce,
                 deadline
-            )
-        );
-
-        return _hashTypedDataV4(structHash);
-    }
-
-    function _hashConsignmentDepositRefundAuthorization(ConsignmentDepositRefundAuthorization calldata authorization)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                CONSIGNMENT_DEPOSIT_REFUND_AUTHORIZATION_TYPEHASH,
-                authorization.itemId,
-                authorization.isApproved,
-                authorization.nonce,
-                authorization.deadline
             )
         );
 
