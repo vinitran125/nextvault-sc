@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {Test} from "forge-std/Test.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Auction} from "../src/Auction.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
@@ -12,6 +13,8 @@ contract AuctionConsignmentDepositTest is Test {
 
     uint256 private adminKey = 0xA11CE;
     address private admin = vm.addr(adminKey);
+    uint256 private operatorKey = 0xB0B;
+    address private operator = vm.addr(operatorKey);
     address private consignor = makeAddr("consignor");
     address private stranger = makeAddr("stranger");
 
@@ -25,6 +28,9 @@ contract AuctionConsignmentDepositTest is Test {
     event ConsignmentDepositCancelled(
         bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, uint256 blockTimestamp
     );
+    event ConsignmentDepositRefunded(
+        bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, bool isApproved, uint256 blockTimestamp
+    );
 
     function setUp() external {
         token = new FakeUSDC();
@@ -32,6 +38,10 @@ contract AuctionConsignmentDepositTest is Test {
         bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin));
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
         auction = Auction(address(proxy));
+
+        bytes32 operatorRole = auction.OPERATOR_ROLE();
+        vm.prank(admin);
+        auction.grantRole(operatorRole, operator);
 
         token.mint(consignor, 1_000 * USDC);
     }
@@ -51,7 +61,7 @@ contract AuctionConsignmentDepositTest is Test {
         vm.prank(consignor);
         auction.depositConsignment(authorization, signature);
 
-        assertTrue(auction.usedConsignmentDepositNonces(authorization.nonce));
+        assertTrue(auction.usedNonces(authorization.nonce));
         assertEq(token.balanceOf(address(auction)), authorization.amount);
         assertEq(token.balanceOf(consignor), 1_000 * USDC - authorization.amount);
     }
@@ -84,7 +94,7 @@ contract AuctionConsignmentDepositTest is Test {
         vm.prank(consignor);
         auction.depositConsignment(authorization, signature);
 
-        assertTrue(auction.usedConsignmentDepositNonces(authorization.nonce));
+        assertTrue(auction.usedNonces(authorization.nonce));
         assertEq(token.balanceOf(address(auction)), authorization.amount);
         assertEq(token.balanceOf(consignor), 1_000 * USDC - authorization.amount);
 
@@ -123,7 +133,7 @@ contract AuctionConsignmentDepositTest is Test {
         auction.cancelConsignmentDeposit(authorization.itemId);
 
         vm.prank(consignor);
-        vm.expectRevert(Auction.ConsignmentDepositNotActive.selector);
+        vm.expectRevert(Auction.InvalidItemDepositStatus.selector);
         auction.cancelConsignmentDeposit(authorization.itemId);
     }
 
@@ -136,8 +146,78 @@ contract AuctionConsignmentDepositTest is Test {
     }
 
     function testCancelConsignmentDepositRevertsWhenMissing() external {
-        vm.expectRevert(Auction.ConsignmentDepositNotFound.selector);
+        vm.expectRevert(Auction.InvalidItemDepositStatus.selector);
         auction.cancelConsignmentDeposit(ITEM_ID);
+    }
+
+    function testOperatorRefundApprovedConsignmentDepositReturnsFundsToConsignor() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _deposit(ITEM_ID, consignor);
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit ConsignmentDepositRefunded(authorization.itemId, consignor, authorization.amount, true, block.timestamp);
+
+        vm.prank(operator);
+        auction.refundConsignmentDeposit(authorization.itemId, true);
+
+        assertEq(token.balanceOf(address(auction)), 0);
+        assertEq(token.balanceOf(consignor), 1_000 * USDC);
+        assertEq(token.balanceOf(operator), 0);
+    }
+
+    function testOperatorRefundRejectedConsignmentDepositReturnsFundsToConsignor() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _deposit(ITEM_ID, consignor);
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit ConsignmentDepositRefunded(authorization.itemId, consignor, authorization.amount, false, block.timestamp);
+
+        vm.prank(operator);
+        auction.refundConsignmentDeposit(authorization.itemId, false);
+
+        assertEq(token.balanceOf(address(auction)), 0);
+        assertEq(token.balanceOf(consignor), 1_000 * USDC);
+        assertEq(token.balanceOf(operator), 0);
+    }
+
+    function testRefundConsignmentDepositRevertsWhenCallerIsNotOperator() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _deposit(ITEM_ID, consignor);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, auction.OPERATOR_ROLE()
+            )
+        );
+        vm.prank(stranger);
+        auction.refundConsignmentDeposit(authorization.itemId, true);
+    }
+
+    function testRefundConsignmentDepositRevertsWhenMissing() external {
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidItemDepositStatus.selector);
+        auction.refundConsignmentDeposit(ITEM_ID, true);
+    }
+
+    function testRefundConsignmentDepositTwiceReverts() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _deposit(ITEM_ID, consignor);
+
+        vm.prank(operator);
+        auction.refundConsignmentDeposit(authorization.itemId, true);
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidItemDepositStatus.selector);
+        auction.refundConsignmentDeposit(authorization.itemId, false);
+
+        assertEq(token.balanceOf(consignor), 1_000 * USDC);
+    }
+
+    function testRefundConsignmentDepositRevertsAfterConsignorCancel() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _deposit(ITEM_ID, consignor);
+
+        vm.prank(consignor);
+        auction.cancelConsignmentDeposit(authorization.itemId);
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidItemDepositStatus.selector);
+        auction.refundConsignmentDeposit(authorization.itemId, true);
     }
 
     function testDepositConsignmentRevertsForExpiredAuthorization() external {
@@ -173,7 +253,7 @@ contract AuctionConsignmentDepositTest is Test {
         vm.expectRevert(Auction.ConsignmentDepositAlreadyExists.selector);
         auction.depositConsignment(duplicate, signature);
 
-        assertTrue(auction.usedConsignmentDepositNonces(authorization.nonce));
+        assertTrue(auction.usedNonces(authorization.nonce));
     }
 
     function _deposit(bytes32 itemId, address owner)

@@ -29,8 +29,13 @@ contract CreateAuctionScript is Script {
             metadataUri: vm.envString("METADATA_URI")
         });
 
+        bytes32 nonce = keccak256(abi.encodePacked("create-auction", address(auction), params.lotId, block.timestamp));
+        uint256 deadline = block.timestamp + 30 minutes;
+        bytes memory signature =
+            _signCreateAuctionAuthorization(auction, params, nonce, deadline, vm.envUint("AUCTION_ADMIN_PRIVATE_KEY"));
+
         vm.startBroadcast();
-        auction.createAuction(params);
+        auction.createAuction(params, nonce, deadline, signature);
         vm.stopBroadcast();
 
         Auction.AuctionConfig memory config = auction.getAuction(lotId);
@@ -42,5 +47,49 @@ contract CreateAuctionScript is Script {
         console2.log("Start time:", config.startTime);
         console2.log("End time:", config.endTime);
         console2.log("NFT price:", config.nftPrice);
+    }
+
+    function _signCreateAuctionAuthorization(
+        Auction auction,
+        Auction.CreateAuctionParams memory params,
+        bytes32 nonce,
+        uint256 deadline,
+        uint256 signerKey
+    ) private view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.CREATE_AUCTION_AUTHORIZATION_TYPEHASH(),
+                params.lotId,
+                params.consignor,
+                params.lowEstimate,
+                params.highEstimate,
+                params.startingBid,
+                params.previewDurationSeconds,
+                params.auctionDurationSeconds,
+                params.designAQuantity,
+                params.designBQuantity,
+                params.designCQuantity,
+                params.nftPriceRatioBps,
+                keccak256(bytes(params.nftName)),
+                keccak256(bytes(params.nftSymbol)),
+                keccak256(bytes(params.thumbnailUrl)),
+                keccak256(bytes(params.metadataUri)),
+                nonce,
+                deadline
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("NextVaultAuction")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(auction)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+
+        return abi.encodePacked(r, s, v);
     }
 }
