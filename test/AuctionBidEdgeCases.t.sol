@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Auction} from "../src/Auction.sol";
+import {AuctionCreateAuthHelper} from "./AuctionCreateAuthHelper.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
 
-contract AuctionBidEdgeCasesTest is Test {
+contract AuctionBidEdgeCasesTest is AuctionCreateAuthHelper {
     Auction private auction;
     FakeUSDC private token;
 
-    address private admin = makeAddr("admin");
+    uint256 private adminKey = 0xA11CE;
+    address private admin = vm.addr(adminKey);
     address private operator = makeAddr("operator");
     address private consignor = makeAddr("consignor");
     address private alice = makeAddr("alice");
@@ -173,7 +174,7 @@ contract AuctionBidEdgeCasesTest is Test {
         });
 
         vm.prank(operator);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
     }
 
     function _buyNft(address buyer) private {

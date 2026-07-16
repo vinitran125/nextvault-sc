@@ -1,24 +1,25 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Auction} from "../src/Auction.sol";
+import {AuctionCreateAuthHelper} from "./AuctionCreateAuthHelper.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
 import {LotNFT} from "../src/LotNFT.sol";
 
-contract AuctionCreateTest is Test {
+contract AuctionCreateTest is AuctionCreateAuthHelper {
     Auction private auction;
     FakeUSDC private token;
 
-    address private admin = makeAddr("admin");
+    uint256 private adminKey = 0xA11CE;
+    address private admin = vm.addr(adminKey);
     address private operator = makeAddr("operator");
     address private consignor = makeAddr("consignor");
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
     uint256 private constant USDC = 1e6;
 
-    event AuctionCreated(bytes32 indexed lotId, bytes data, uint256 blockTimestamp);
+    event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
 
     function setUp() external {
         token = new FakeUSDC();
@@ -36,11 +37,11 @@ contract AuctionCreateTest is Test {
         Auction.CreateAuctionParams memory params = _defaultParams();
         uint256 createdAt = block.timestamp;
 
-        vm.expectEmit(true, false, false, false, address(auction));
-        emit AuctionCreated(params.lotId, "", createdAt);
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit AuctionCreated(params.lotId, createdAt);
 
         vm.prank(operator);
-        bytes32 lotId = auction.createAuction(params);
+        bytes32 lotId = _createAuctionWithAdminSignature(auction, params, adminKey);
 
         assertEq(lotId, params.lotId);
         assertTrue(auction.auctionExists(params.lotId));
@@ -56,13 +57,9 @@ contract AuctionCreateTest is Test {
         assertEq(config.startTime, createdAt + params.previewDurationSeconds);
         assertEq(config.endTime, config.startTime + params.auctionDurationSeconds);
         assertEq(config.nftMaxSupply, 100);
-        assertEq(config.designAQuantity, params.designAQuantity);
-        assertEq(config.designBQuantity, params.designBQuantity);
-        assertEq(config.designCQuantity, params.designCQuantity);
         assertEq(config.nftPriceRatioBps, params.nftPriceRatioBps);
         assertEq(config.nftPrice, 10 * USDC);
         assertEq(config.thumbnailUrl, params.thumbnailUrl);
-        assertEq(config.metadataUri, params.metadataUri);
 
         LotNFT nft = LotNFT(config.nftCollection);
         assertEq(nft.name(), params.nftName);
@@ -80,25 +77,28 @@ contract AuctionCreateTest is Test {
         params.previewDurationSeconds = 0;
 
         vm.prank(operator);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
 
         assertEq(uint256(auction.currentStatus(params.lotId)), uint256(Auction.AuctionStatus.Active));
     }
 
-    function testCreateAuctionRevertsForNonOperator() external {
+    function testCreateAuctionRevertsForInvalidSigner() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
+        bytes32 nonce = keccak256("invalid create auction signer");
+        uint256 deadline = block.timestamp + 30 minutes;
+        bytes memory signature = _signCreateAuctionAuthorization(auction, params, nonce, deadline, 0xB0B);
 
-        vm.expectRevert();
-        auction.createAuction(params);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.createAuction(params, nonce, deadline, signature);
     }
 
     function testCreateAuctionRevertsForDuplicateLot() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
 
         vm.startPrank(operator);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
         vm.expectRevert(Auction.LotAlreadyRegistered.selector);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
         vm.stopPrank();
     }
 
@@ -110,7 +110,7 @@ contract AuctionCreateTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(Auction.InvalidRarityAllocation.selector);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
     }
 
     function testCreateAuctionRevertsForInvalidEstimates() external {
@@ -119,7 +119,7 @@ contract AuctionCreateTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(Auction.InvalidEstimate.selector);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
     }
 
     function testCreateAuctionRevertsForStartingBidBelowLowEstimate() external {
@@ -128,7 +128,7 @@ contract AuctionCreateTest is Test {
 
         vm.prank(operator);
         vm.expectRevert(Auction.InvalidStartingBid.selector);
-        auction.createAuction(params);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
     }
 
     function _defaultParams() private view returns (Auction.CreateAuctionParams memory) {

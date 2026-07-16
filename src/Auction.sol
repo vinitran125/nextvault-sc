@@ -19,10 +19,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
         "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,uint256 amount,bytes32 nonce,uint256 deadline)"
     );
+    bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
+        "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 designAQuantity,uint256 designBQuantity,uint256 designCQuantity,uint16 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
+    );
+    bytes32 public constant CONSIGNMENT_DEPOSIT_REFUND_AUTHORIZATION_TYPEHASH = keccak256(
+        "ConsignmentDepositRefundAuthorization(bytes32 itemId,bool isApproved,bytes32 nonce,uint256 deadline)"
+    );
 
-    mapping(bytes32 => address) private currentBidderItem;
-    mapping(bytes32 => uint256) private currentBidItem;
-    mapping(bytes32 => mapping(address => uint256)) private creditMaxBidItem;
     enum AuctionStatus {
         Preview,
         Active,
@@ -42,13 +45,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 previewDurationSeconds;
         uint256 auctionDurationSeconds;
         uint256 nftMaxSupply;
-        uint256 designAQuantity;
-        uint256 designBQuantity;
-        uint256 designCQuantity;
         uint16 nftPriceRatioBps;
         uint256 nftPrice;
         string thumbnailUrl;
-        string metadataUri;
     }
 
     struct CreateAuctionParams {
@@ -69,23 +68,16 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         string metadataUri;
     }
 
-    struct PermitData {
-        uint256 value;
-        uint256 deadline;
-        uint8 v;
-        bytes32 r;
-        bytes32 s;
-    }
-
     struct BidderState {
         uint256 deposit;
         bool activeMaxBid;
     }
 
-    enum ConsignmentDepositStatus {
+    enum ItemDepositStatus {
         None,
         Deposited,
-        Cancelled
+        Cancelled,
+        Refunded
     }
 
     struct ConsignmentDepositAuthorization {
@@ -96,10 +88,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 deadline;
     }
 
-    struct ConsignmentDepositState {
-        address consignor;
-        uint256 amount;
-        ConsignmentDepositStatus status;
+    struct ConsignmentDepositRefundAuthorization {
+        bytes32 itemId;
+        bool isApproved;
+        bytes32 nonce;
+        uint256 deadline;
     }
 
     error InvalidToken();
@@ -132,11 +125,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error AuthorizationExpired();
     error NonceAlreadyUsed();
     error ConsignmentDepositAlreadyExists();
-    error ConsignmentDepositNotFound();
-    error ConsignmentDepositNotActive();
+    error InvalidItemDepositStatus();
     error UnauthorizedConsignmentDepositCancel();
 
-    event AuctionCreated(bytes32 indexed lotId, bytes data, uint256 blockTimestamp);
+    event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
     event AuctionCancelled(bytes32 indexed lotId, uint256 blockTimestamp);
     event NFTPurchased(
         bytes32 indexed lotId,
@@ -147,7 +139,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 blockTimestamp
     );
     event BidPlaced(bytes32 indexed lotId, address indexed bidder, uint256 bidAmount, uint256 blockTimestamp);
-    event BidStep(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event MaxBidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event LotNFTTransferred(
@@ -164,17 +155,33 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     event ConsignmentDepositCancelled(
         bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, uint256 blockTimestamp
     );
+    event ConsignmentDepositRefunded(
+        bytes32 indexed itemId,
+        address indexed consignor,
+        uint256 refundAmount,
+        bool isApproved,
+        bytes32 nonce,
+        uint256 blockTimestamp
+    );
 
     IERC20 public token;
     uint256 private tokenDecimal;
+    bytes32[] private lotIds;
 
     mapping(bytes32 => AuctionConfig) private auctions;
     mapping(bytes32 => bool) public auctionExists;
     mapping(bytes32 => bool) public cancelledAuctions;
     mapping(bytes32 => mapping(address => BidderState)) private bidderStates;
-    mapping(bytes32 => ConsignmentDepositState) private consignmentDeposits;
-    mapping(bytes32 => bool) public usedConsignmentDepositNonces;
-    bytes32[] private lotIds;
+
+    mapping(bytes32 => address) private itemDepositConsignor;
+    mapping(bytes32 => uint256) private itemDepositAmount;
+    mapping(bytes32 => ItemDepositStatus) private itemDepositStatus;
+
+    mapping(bytes32 => address) private currentBidderItem;
+    mapping(bytes32 => uint256) private currentBidItem;
+    mapping(bytes32 => mapping(address => uint256)) private creditMaxBidItem;
+
+    mapping(bytes32 => bool) public usedNonces;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -197,7 +204,20 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         // Upgrade authorization is handled by AccessControl.
     }
 
-    function createAuction(CreateAuctionParams calldata params) external onlyRole(OPERATOR_ROLE) returns (bytes32) {
+    function createAuction(
+        CreateAuctionParams calldata params,
+        bytes32 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (bytes32) {
+        if (block.timestamp > deadline) revert AuthorizationExpired();
+        if (usedNonces[nonce]) revert NonceAlreadyUsed();
+
+        address signer = ECDSA.recover(_hashCreateAuctionAuthorization(params, nonce, deadline), signature);
+        if (!hasRole(DEFAULT_ADMIN_ROLE, signer)) revert InvalidSigner();
+
+        usedNonces[nonce] = true;
+
         if (params.lotId == bytes32(0)) revert InvalidLotId();
         if (auctionExists[params.lotId]) revert LotAlreadyRegistered();
         if (params.consignor == address(0)) revert InvalidConsignor();
@@ -242,18 +262,14 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             previewDurationSeconds: params.previewDurationSeconds,
             auctionDurationSeconds: params.auctionDurationSeconds,
             nftMaxSupply: nftMaxSupply,
-            designAQuantity: params.designAQuantity,
-            designBQuantity: params.designBQuantity,
-            designCQuantity: params.designCQuantity,
             nftPriceRatioBps: params.nftPriceRatioBps,
             nftPrice: nftPrice,
-            thumbnailUrl: params.thumbnailUrl,
-            metadataUri: params.metadataUri
+            thumbnailUrl: params.thumbnailUrl
         });
         auctionExists[params.lotId] = true;
         lotIds.push(params.lotId);
 
-        emit AuctionCreated(params.lotId, abi.encode(auctions[params.lotId]), block.timestamp);
+        emit AuctionCreated(params.lotId, block.timestamp);
 
         return params.lotId;
     }
@@ -386,36 +402,60 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
         if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
         if (authorization.amount == 0) revert InvalidAmount();
-        if (usedConsignmentDepositNonces[authorization.nonce]) revert NonceAlreadyUsed();
-        if (consignmentDeposits[authorization.itemId].status != ConsignmentDepositStatus.None) {
+        if (usedNonces[authorization.nonce]) revert NonceAlreadyUsed();
+        if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.None) {
             revert ConsignmentDepositAlreadyExists();
         }
 
         address signer = ECDSA.recover(_hashConsignmentDepositAuthorization(authorization), signature);
         if (!hasRole(DEFAULT_ADMIN_ROLE, signer)) revert InvalidSigner();
 
-        usedConsignmentDepositNonces[authorization.nonce] = true;
-        consignmentDeposits[authorization.itemId] = ConsignmentDepositState({
-            consignor: authorization.consignor, amount: authorization.amount, status: ConsignmentDepositStatus.Deposited
-        });
+        usedNonces[authorization.nonce] = true;
+        itemDepositAmount[authorization.itemId] = authorization.amount;
+        itemDepositConsignor[authorization.itemId] = msg.sender;
+        itemDepositStatus[authorization.itemId] = ItemDepositStatus.Deposited;
 
         token.safeTransferFrom(msg.sender, address(this), authorization.amount);
 
         emit ConsignmentDepositCreated(
-            authorization.itemId, authorization.consignor, address(token), authorization.amount, block.timestamp
+            authorization.itemId, msg.sender, address(token), authorization.amount, block.timestamp
         );
     }
 
     function cancelConsignmentDeposit(bytes32 itemId) external {
-        ConsignmentDepositState storage state = consignmentDeposits[itemId];
-        if (state.status == ConsignmentDepositStatus.None) revert ConsignmentDepositNotFound();
-        if (state.status != ConsignmentDepositStatus.Deposited) revert ConsignmentDepositNotActive();
-        if (state.consignor != msg.sender) revert UnauthorizedConsignmentDepositCancel();
+        if (itemDepositStatus[itemId] != ItemDepositStatus.Deposited) revert InvalidItemDepositStatus();
+        if (itemDepositConsignor[itemId] != msg.sender) revert UnauthorizedConsignmentDepositCancel();
 
-        state.status = ConsignmentDepositStatus.Cancelled;
-        token.safeTransfer(state.consignor, state.amount);
+        uint256 amount = itemDepositAmount[itemId];
+        itemDepositStatus[itemId] = ItemDepositStatus.Cancelled;
+        token.safeTransfer(msg.sender, amount);
 
-        emit ConsignmentDepositCancelled(itemId, msg.sender, state.amount, block.timestamp);
+        emit ConsignmentDepositCancelled(itemId, msg.sender, amount, block.timestamp);
+    }
+
+    function refundConsignmentDeposit(
+        ConsignmentDepositRefundAuthorization calldata authorization,
+        bytes calldata signature
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
+        if (usedNonces[authorization.nonce]) revert NonceAlreadyUsed();
+        if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.Deposited) {
+            revert InvalidItemDepositStatus();
+        }
+
+        address signer = ECDSA.recover(_hashConsignmentDepositRefundAuthorization(authorization), signature);
+        if (!hasRole(OPERATOR_ROLE, signer)) revert InvalidSigner();
+
+        usedNonces[authorization.nonce] = true;
+
+        address consignor = itemDepositConsignor[authorization.itemId];
+        uint256 amount = itemDepositAmount[authorization.itemId];
+        itemDepositStatus[authorization.itemId] = ItemDepositStatus.Refunded;
+        token.safeTransfer(consignor, amount);
+
+        emit ConsignmentDepositRefunded(
+            authorization.itemId, consignor, amount, authorization.isApproved, authorization.nonce, block.timestamp
+        );
     }
 
     function getAuction(bytes32 lotId) external view returns (AuctionConfig memory) {
@@ -451,6 +491,55 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return _hashTypedDataV4(structHash);
     }
 
+    function _hashCreateAuctionAuthorization(CreateAuctionParams calldata params, bytes32 nonce, uint256 deadline)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CREATE_AUCTION_AUTHORIZATION_TYPEHASH,
+                params.lotId,
+                params.consignor,
+                params.lowEstimate,
+                params.highEstimate,
+                params.startingBid,
+                params.previewDurationSeconds,
+                params.auctionDurationSeconds,
+                params.designAQuantity,
+                params.designBQuantity,
+                params.designCQuantity,
+                params.nftPriceRatioBps,
+                keccak256(bytes(params.nftName)),
+                keccak256(bytes(params.nftSymbol)),
+                keccak256(bytes(params.thumbnailUrl)),
+                keccak256(bytes(params.metadataUri)),
+                nonce,
+                deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
+    function _hashConsignmentDepositRefundAuthorization(ConsignmentDepositRefundAuthorization calldata authorization)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CONSIGNMENT_DEPOSIT_REFUND_AUTHORIZATION_TYPEHASH,
+                authorization.itemId,
+                authorization.isApproved,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
     function _currentStatus(uint256 startTime, uint256 previewDurationSeconds, uint256 endTime)
         internal
         view
@@ -463,47 +552,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             return AuctionStatus.Active;
         }
         return AuctionStatus.Preview;
-    }
-
-    function _bidIncrementFor(uint256 amount) internal view returns (uint256) {
-        uint256 offset;
-
-        if (amount < 2_000 * tokenDecimal) return 100 * tokenDecimal;
-        if (amount < 5_000 * tokenDecimal) {
-            offset = amount % (1_000 * tokenDecimal);
-            if (offset == 0) return 200 * tokenDecimal;
-            if (offset == 200 * tokenDecimal) return 300 * tokenDecimal;
-            if (offset == 500 * tokenDecimal) return 300 * tokenDecimal;
-            return 200 * tokenDecimal;
-        }
-        if (amount < 10_000 * tokenDecimal) return 500 * tokenDecimal;
-        if (amount < 20_000 * tokenDecimal) return 1_000 * tokenDecimal;
-        if (amount < 50_000 * tokenDecimal) {
-            offset = amount % (10_000 * tokenDecimal);
-            if (offset == 0) return 2_000 * tokenDecimal;
-            if (offset == 2_000 * tokenDecimal) return 3_000 * tokenDecimal;
-            if (offset == 5_000 * tokenDecimal) return 3_000 * tokenDecimal;
-            return 2_000 * tokenDecimal;
-        }
-        if (amount < 100_000 * tokenDecimal) return 5_000 * tokenDecimal;
-        if (amount < 200_000 * tokenDecimal) return 10_000 * tokenDecimal;
-        if (amount < 500_000 * tokenDecimal) {
-            offset = amount % (100_000 * tokenDecimal);
-            if (offset == 0) return 20_000 * tokenDecimal;
-            if (offset == 20_000 * tokenDecimal) return 30_000 * tokenDecimal;
-            if (offset == 50_000 * tokenDecimal) return 30_000 * tokenDecimal;
-            return 20_000 * tokenDecimal;
-        }
-        if (amount < 1_000_000 * tokenDecimal) return 50_000 * tokenDecimal;
-        if (amount < 2_000_000 * tokenDecimal) return 100_000 * tokenDecimal;
-        if (amount < 5_000_000 * tokenDecimal) {
-            offset = amount % (1_000_000 * tokenDecimal);
-            if (offset == 0) return 200_000 * tokenDecimal;
-            if (offset == 200_000 * tokenDecimal) return 300_000 * tokenDecimal;
-            if (offset == 500_000 * tokenDecimal) return 300_000 * tokenDecimal;
-            return 200_000 * tokenDecimal;
-        }
-        return 500_000 * tokenDecimal;
     }
 
     function _bidIncrementFor(uint256 amount) internal view returns (uint256) {
