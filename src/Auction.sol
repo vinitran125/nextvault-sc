@@ -96,7 +96,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidRarityAllocation();
     error AuctionNotFound();
     error AuctionAlreadyCancelled();
+    error AuctionAlreadyEnded();
+    error AuctionPaymentAlreadyCollected();
     error AuctionIsCancelled();
+    error AuctionHasNoWinner();
+    error AuctionNotEnded();
     error AuctionNotActive();
     error InvalidQuantity();
     error MintLimitExceeded();
@@ -120,6 +124,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
     event AuctionCancelled(bytes32 indexed lotId, uint256 blockTimestamp);
+    event AuctionWithdrawn(
+        bytes32 indexed lotId, address indexed highestBidder, uint256 refundedDeposit, uint256 blockTimestamp
+    );
+    event AuctionEnded(
+        bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
+    );
+    event WinnerPaymentCollected(
+        bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
+    );
     event NFTPurchased(
         bytes32 indexed lotId,
         address indexed buyer,
@@ -167,6 +180,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     mapping(bytes32 => mapping(address => uint256)) private creditMaxBidItem;
 
     mapping(bytes32 => bool) public usedNonces;
+    mapping(bytes32 => bool) public endedAuctions;
+    mapping(bytes32 => bool) public auctionPaymentCollected;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -364,16 +379,99 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit MaxBidRefunded(lotId, bidder, amount, block.timestamp);
     }
 
-    //    function cancelAuction(bytes32 lotId) external onlyRole(OPERATOR_ROLE) {
-    //        if (!auctionExists[lotId]) revert AuctionNotFound();
-    //        if (cancelledAuctions[lotId]) {
-    //            revert AuctionAlreadyCancelled();
-    //        }
-    //
-    //        cancelledAuctions[lotId] = true;
-    //        emit AuctionCancelled(lotId, block.timestamp);
-    //    }
-    //
+    function endAuction(bytes32 lotId)
+        external
+        onlyRole(OPERATOR_ROLE)
+        returns (address winner, uint256 winningBid, bool paymentCollected)
+    {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
+        if (endedAuctions[lotId]) revert AuctionAlreadyEnded();
+        if (block.timestamp < auctions[lotId].endTime) revert AuctionNotEnded();
+
+        endedAuctions[lotId] = true;
+        winner = currentBidderItem[lotId];
+        winningBid = currentBidItem[lotId];
+        paymentCollected = _tryCollectWinnerPayment(lotId, winner, winningBid);
+        auctionPaymentCollected[lotId] = paymentCollected;
+
+        emit AuctionEnded(lotId, winner, winningBid, paymentCollected, block.timestamp);
+    }
+
+    function _tryCollectWinnerPayment(bytes32 lotId, address winner, uint256 winningBid) internal returns (bool) {
+        if (winner == address(0)) return false;
+
+        BidderState storage winnerState = bidderStates[lotId][winner];
+        uint256 remainingPayment = winningBid > winnerState.deposit ? winningBid - winnerState.deposit : 0;
+        if (remainingPayment == 0) return true;
+        if (token.balanceOf(winner) < remainingPayment || token.allowance(winner, address(this)) < remainingPayment) {
+            return false;
+        }
+
+        try token.transferFrom(winner, address(this), remainingPayment) returns (bool transferred) {
+            if (!transferred) return false;
+            winnerState.deposit = winningBid;
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    function collectWinnerPayment(bytes32 lotId) external onlyRole(OPERATOR_ROLE) returns (bool paymentCollected) {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (!endedAuctions[lotId]) revert AuctionNotEnded();
+        if (auctionPaymentCollected[lotId]) revert AuctionPaymentAlreadyCollected();
+
+        address winner = currentBidderItem[lotId];
+        if (winner == address(0)) revert AuctionHasNoWinner();
+
+        uint256 winningBid = currentBidItem[lotId];
+        paymentCollected = _tryCollectWinnerPayment(lotId, winner, winningBid);
+        auctionPaymentCollected[lotId] = paymentCollected;
+
+        emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
+    }
+
+    function withdrawAuction(bytes32 lotId)
+        external
+        onlyRole(OPERATOR_ROLE)
+        returns (address highestBidder, uint256 refundedDeposit)
+    {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (cancelledAuctions[lotId]) revert AuctionAlreadyCancelled();
+
+        AuctionConfig memory auction = auctions[lotId];
+        if (
+            endedAuctions[lotId]
+                || _currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime)
+                    != AuctionStatus.Active
+        ) revert AuctionNotActive();
+
+        highestBidder = currentBidderItem[lotId];
+        cancelledAuctions[lotId] = true;
+
+        if (highestBidder != address(0)) {
+            BidderState storage bidderState = bidderStates[lotId][highestBidder];
+            refundedDeposit = bidderState.deposit;
+            bool isMaxBid = bidderState.activeMaxBid;
+
+            bidderState.deposit = 0;
+            bidderState.activeMaxBid = false;
+            creditMaxBidItem[lotId][highestBidder] = 0;
+
+            if (refundedDeposit > 0) {
+                token.safeTransfer(highestBidder, refundedDeposit);
+                if (isMaxBid) {
+                    emit MaxBidRefunded(lotId, highestBidder, refundedDeposit, block.timestamp);
+                } else {
+                    emit BidRefunded(lotId, highestBidder, refundedDeposit, block.timestamp);
+                }
+            }
+        }
+
+        emit AuctionWithdrawn(lotId, highestBidder, refundedDeposit, block.timestamp);
+    }
+
     function onLotNFTTransfer(bytes32 lotId, address from, address to, uint256 tokenId) external {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (auctions[lotId].nftCollection != msg.sender) revert InvalidNftCollection();
