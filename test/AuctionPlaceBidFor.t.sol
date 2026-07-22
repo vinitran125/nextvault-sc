@@ -235,6 +235,48 @@ contract AuctionPlaceBidForTest is AuctionCreateAuthHelper {
         assertEq(token.balanceOf(address(auction)), NFT_PRICE * 2 + secondBid / 10);
     }
 
+    function testMaxBidderCanUseManualBidOnlyAfterOutbidDepositIsRefunded() external {
+        uint256 startingBid = 500 * USDC;
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.lowEstimate = startingBid;
+        params.highEstimate = 1_000 * USDC;
+        params.startingBid = startingBid;
+        params.previewDurationSeconds = 0;
+        vm.prank(operator);
+        _createAuctionWithAdminSignature(auction, params, adminKey);
+
+        _buyNft(bidderA, 1);
+        _buyNft(bidderB, 1);
+
+        uint256 bidderAMaxBid = 600 * USDC;
+        uint256 bidderBManualBid = 700 * USDC;
+        uint256 bidderANextManualBid = 800 * USDC;
+
+        _approveBidDeposit(bidderA, bidderAMaxBid);
+        vm.startPrank(operator);
+        auction.placeBidFor(LOT_ID, bidderA, startingBid);
+        auction.placeBidFor(LOT_ID, bidderA, bidderAMaxBid);
+        vm.stopPrank();
+
+        _approveBidDeposit(bidderB, bidderBManualBid);
+        vm.prank(bidderB);
+        auction.placeBid(LOT_ID, bidderBManualBid);
+
+        _approveBidDeposit(bidderA, bidderANextManualBid);
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.BidModeConflict.selector);
+        auction.placeBid(LOT_ID, bidderANextManualBid);
+
+        vm.prank(operator);
+        auction.refundMaxBid(LOT_ID, bidderA);
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, bidderANextManualBid);
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(token.balanceOf(address(auction)), config.nftPrice * 2 + bidderANextManualBid / 10);
+    }
+
     function testRefundMaxBidRevertsForNonOperator() external {
         _createActiveAuction();
         _buyNft(bidderA, 1);
