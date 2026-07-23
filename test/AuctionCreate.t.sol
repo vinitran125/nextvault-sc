@@ -24,6 +24,14 @@ contract AuctionCreateTest is Test {
     uint256 private constant STARTING_BID = 10_000 * USDC;
 
     event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
+    event AuctionDetailsUpdated(
+        bytes32 indexed lotId,
+        address indexed consignor,
+        uint256 lowEstimate,
+        uint256 highEstimate,
+        string thumbnailUrl,
+        uint256 blockTimestamp
+    );
 
     function setUp() external {
         token = new FakeUSDC();
@@ -94,6 +102,81 @@ contract AuctionCreateTest is Test {
         assertEq(config.startTime, block.timestamp);
         assertEq(config.endTime, block.timestamp + 7 days);
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Active));
+    }
+
+    function testOperatorCanUpdateAuctionDetailsDuringPreview() external {
+        _createDefaultAuction();
+        address newConsignor = makeAddr("new-consignor");
+        uint256 newLowEstimate = 12_000 * USDC;
+        uint256 newHighEstimate = 24_000 * USDC;
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit AuctionDetailsUpdated(
+            LOT_ID, newConsignor, newLowEstimate, newHighEstimate, "ipfs://new-thumbnail", block.timestamp
+        );
+
+        vm.prank(operator);
+        auction.updateAuctionDetails(LOT_ID, newConsignor, newLowEstimate, newHighEstimate, "ipfs://new-thumbnail");
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(config.consignor, newConsignor);
+        assertEq(config.lowEstimate, newLowEstimate);
+        assertEq(config.highEstimate, newHighEstimate);
+        assertEq(config.thumbnailUrl, "ipfs://new-thumbnail");
+
+        assertEq(config.startingBid, STARTING_BID);
+        assertEq(config.nftPriceRatioBps, 1_000);
+        assertEq(config.nftPrice, 10 * USDC);
+        assertEq(config.previewDurationSeconds, 1 days);
+        assertEq(config.auctionDurationSeconds, 7 days);
+    }
+
+    function testOperatorCanUpdateAuctionDetailsWhileActive() external {
+        _createDefaultAuction();
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operator);
+        auction.updateAuctionDetails(
+            LOT_ID, makeAddr("active-consignor"), 11_000 * USDC, 21_000 * USDC, "ipfs://active-thumbnail"
+        );
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(config.lowEstimate, 11_000 * USDC);
+        assertEq(config.highEstimate, 21_000 * USDC);
+    }
+
+    function testUpdateAuctionDetailsRevertsForNonOperator() external {
+        _createDefaultAuction();
+
+        vm.expectRevert();
+        auction.updateAuctionDetails(
+            LOT_ID, makeAddr("new-consignor"), 11_000 * USDC, 21_000 * USDC, "ipfs://new-thumbnail"
+        );
+    }
+
+    function testUpdateAuctionDetailsRevertsForInvalidValues() external {
+        _createDefaultAuction();
+
+        vm.startPrank(operator);
+        vm.expectRevert(Auction.InvalidConsignor.selector);
+        auction.updateAuctionDetails(LOT_ID, address(0), 11_000 * USDC, 21_000 * USDC, "ipfs://thumbnail");
+
+        vm.expectRevert(Auction.InvalidEstimate.selector);
+        auction.updateAuctionDetails(
+            LOT_ID, makeAddr("new-consignor"), 22_000 * USDC, 21_000 * USDC, "ipfs://thumbnail"
+        );
+        vm.stopPrank();
+    }
+
+    function testUpdateAuctionDetailsRevertsAfterAuctionTimeEnds() external {
+        _createDefaultAuction();
+        vm.warp(block.timestamp + 8 days);
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.AuctionDetailsLocked.selector);
+        auction.updateAuctionDetails(
+            LOT_ID, makeAddr("new-consignor"), 11_000 * USDC, 21_000 * USDC, "ipfs://thumbnail"
+        );
     }
 
     function testCreateAuctionRevertsWhenAuthorizationExpired() external {
@@ -228,6 +311,13 @@ contract AuctionCreateTest is Test {
         LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
         assertEq(nft.maxSupply(), 1);
         assertEq(nft.initialMintLimit(), 1);
+    }
+
+    function _createDefaultAuction() private {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        bytes32 nonce = _nonce("update-details");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
     }
 
     function _expectCreateRevert(Auction.CreateAuctionParams memory params, string memory nonceSeed, bytes4 selector)

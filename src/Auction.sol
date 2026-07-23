@@ -120,8 +120,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidItemDepositStatus();
     error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
+    error AuctionDetailsLocked();
 
     event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
+    event AuctionDetailsUpdated(
+        bytes32 indexed lotId,
+        address indexed consignor,
+        uint256 lowEstimate,
+        uint256 highEstimate,
+        string thumbnailUrl,
+        uint256 blockTimestamp
+    );
     event AuctionWithdrawn(bytes32 indexed lotId, address indexed highestBidder, uint256 blockTimestamp);
     event AuctionEnded(
         bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
@@ -309,6 +318,34 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit AuctionCreated(params.lotId, block.timestamp);
 
         return params.lotId;
+    }
+
+    function updateAuctionDetails(
+        bytes32 lotId,
+        address consignor,
+        uint256 lowEstimate,
+        uint256 highEstimate,
+        string calldata thumbnailUrl
+    ) external onlyRole(OPERATOR_ROLE) {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (consignor == address(0)) revert InvalidConsignor();
+        if (lowEstimate == 0 || highEstimate < lowEstimate) revert InvalidEstimate();
+
+        AuctionConfig storage auction = auctions[lotId];
+        AuctionStatus status = _currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime);
+        if (
+            cancelledAuctions[lotId] || endedAuctions[lotId] || auctionPaymentCollected[lotId]
+                || (status != AuctionStatus.Preview && status != AuctionStatus.Active)
+        ) {
+            revert AuctionDetailsLocked();
+        }
+
+        auction.consignor = consignor;
+        auction.lowEstimate = lowEstimate;
+        auction.highEstimate = highEstimate;
+        auction.thumbnailUrl = thumbnailUrl;
+
+        emit AuctionDetailsUpdated(lotId, consignor, lowEstimate, highEstimate, thumbnailUrl, block.timestamp);
     }
 
     function buyNFT(bytes32 lotId, uint256 quantity) external {
