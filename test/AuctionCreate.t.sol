@@ -2,22 +2,26 @@
 pragma solidity ^0.8.13;
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {Test} from "forge-std/Test.sol";
 import {Auction} from "../src/Auction.sol";
-import {AuctionCreateAuthHelper} from "./AuctionCreateAuthHelper.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
 import {LotNFT} from "../src/LotNFT.sol";
 
-contract AuctionCreateTest is AuctionCreateAuthHelper {
+contract AuctionCreateTest is Test {
     Auction private auction;
     FakeUSDC private token;
 
     uint256 private adminKey = 0xA11CE;
+    uint256 private nonAdminKey = 0xB0B;
     address private admin = vm.addr(adminKey);
     address private operator = makeAddr("operator");
     address private consignor = makeAddr("consignor");
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
     uint256 private constant USDC = 1e6;
+    uint256 private constant LOW_ESTIMATE = 10_000 * USDC;
+    uint256 private constant HIGH_ESTIMATE = 20_000 * USDC;
+    uint256 private constant STARTING_BID = 10_000 * USDC;
 
     event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
 
@@ -33,111 +37,216 @@ contract AuctionCreateTest is AuctionCreateAuthHelper {
         auction.grantRole(operatorRole, operator);
     }
 
-    function testCreateAuctionStoresConfigAndDeploysNft() external {
+    function testCreateAuctionStoresConfigAndDeploysLotNft() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
-        uint256 createdAt = block.timestamp;
+        bytes32 nonce = _nonce("happy");
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _sign(params, nonce, deadline, adminKey);
 
         vm.expectEmit(true, false, false, true, address(auction));
-        emit AuctionCreated(params.lotId, createdAt);
+        emit AuctionCreated(LOT_ID, block.timestamp);
 
         vm.prank(operator);
-        bytes32 lotId = _createAuctionWithAdminSignature(auction, params, adminKey);
+        bytes32 createdLotId = auction.createAuction(params, nonce, deadline, signature);
 
-        assertEq(lotId, params.lotId);
-        assertTrue(auction.auctionExists(params.lotId));
+        assertEq(createdLotId, LOT_ID);
+        assertTrue(auction.auctionExists(LOT_ID));
+        assertTrue(auction.usedNonces(nonce));
 
-        Auction.AuctionConfig memory config = auction.getAuction(params.lotId);
-        assertEq(config.lotId, params.lotId);
-        assertEq(config.consignor, params.consignor);
-        assertEq(config.lowEstimate, params.lowEstimate);
-        assertEq(config.highEstimate, params.highEstimate);
-        assertEq(config.startingBid, params.startingBid);
-        assertEq(config.previewDurationSeconds, params.previewDurationSeconds);
-        assertEq(config.auctionDurationSeconds, params.auctionDurationSeconds);
-        assertEq(config.startTime, createdAt + params.previewDurationSeconds);
-        assertEq(config.endTime, config.startTime + params.auctionDurationSeconds);
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(config.lotId, LOT_ID);
+        assertEq(config.consignor, consignor);
+        assertEq(config.lowEstimate, LOW_ESTIMATE);
+        assertEq(config.highEstimate, HIGH_ESTIMATE);
+        assertEq(config.startingBid, STARTING_BID);
+        assertEq(config.previewDurationSeconds, 1 days);
+        assertEq(config.auctionDurationSeconds, 7 days);
+        assertEq(config.startTime, block.timestamp + 1 days);
+        assertEq(config.endTime, block.timestamp + 8 days);
         assertEq(config.nftMaxSupply, 100);
-        assertEq(config.nftPriceRatioBps, params.nftPriceRatioBps);
+        assertEq(config.nftPriceRatioBps, 1_000);
         assertEq(config.nftPrice, 10 * USDC);
-        assertEq(config.thumbnailUrl, params.thumbnailUrl);
+        assertEq(config.thumbnailUrl, "ipfs://thumbnail");
+        assertTrue(config.nftCollection != address(0));
 
         LotNFT nft = LotNFT(config.nftCollection);
-        assertEq(nft.name(), params.nftName);
-        assertEq(nft.symbol(), params.nftSymbol);
+        assertEq(nft.name(), "NextVault Lot 1");
+        assertEq(nft.symbol(), "NVL1");
+        assertEq(nft.lotId(), LOT_ID);
         assertEq(nft.auction(), address(auction));
-        assertEq(nft.lotId(), params.lotId);
-        assertEq(nft.maxSupply(), config.nftMaxSupply);
-        assertEq(nft.designAQuantity(), params.designAQuantity);
-        assertEq(nft.designBQuantity(), params.designBQuantity);
-        assertEq(nft.designCQuantity(), params.designCQuantity);
+        assertEq(nft.maxSupply(), 100);
+        assertEq(nft.designAQuantity(), 50);
+        assertEq(nft.designBQuantity(), 30);
+        assertEq(nft.designCQuantity(), 20);
+        assertEq(nft.initialMintLimit(), 5);
     }
 
-    function testCreateAuctionWithZeroPreviewStartsActive() external {
+    function testCreateAuctionWithZeroPreviewStartsImmediately() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         params.previewDurationSeconds = 0;
+        bytes32 nonce = _nonce("zero-preview");
+        uint256 deadline = block.timestamp + 1 hours;
 
         vm.prank(operator);
-        _createAuctionWithAdminSignature(auction, params, adminKey);
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
 
-        assertEq(uint256(auction.currentStatus(params.lotId)), uint256(Auction.AuctionStatus.Active));
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(config.startTime, block.timestamp);
+        assertEq(config.endTime, block.timestamp + 7 days);
+        assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Active));
     }
 
-    function testCreateAuctionRevertsForInvalidSigner() external {
+    function testCreateAuctionRevertsWhenAuthorizationExpired() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
-        bytes32 nonce = keccak256("invalid create auction signer");
-        uint256 deadline = block.timestamp + 30 minutes;
-        bytes memory signature = _signCreateAuctionAuthorization(auction, params, nonce, deadline, 0xB0B);
+        bytes32 nonce = _nonce("expired");
+        uint256 deadline = block.timestamp - 1;
+        bytes memory signature = _sign(params, nonce, deadline, adminKey);
+
+        vm.expectRevert(Auction.AuthorizationExpired.selector);
+        auction.createAuction(params, nonce, deadline, signature);
+    }
+
+    function testCreateAuctionRevertsWhenNonceAlreadyUsed() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        bytes32 nonce = _nonce("reuse");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        params.lotId = bytes32(uint256(2));
+        bytes memory signature = _sign(params, nonce, deadline, adminKey);
+        vm.expectRevert(Auction.NonceAlreadyUsed.selector);
+        auction.createAuction(params, nonce, deadline, signature);
+    }
+
+    function testCreateAuctionRevertsWhenSignerIsNotAdmin() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        bytes32 nonce = _nonce("bad-signer");
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _sign(params, nonce, deadline, nonAdminKey);
 
         vm.expectRevert(Auction.InvalidSigner.selector);
         auction.createAuction(params, nonce, deadline, signature);
     }
 
-    function testCreateAuctionRevertsForDuplicateLot() external {
-        Auction.CreateAuctionParams memory params = _defaultParams();
+    function testCreateAuctionRevertsWhenSignatureDoesNotMatchParams() external {
+        Auction.CreateAuctionParams memory signedParams = _defaultParams();
+        bytes32 nonce = _nonce("tampered");
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _sign(signedParams, nonce, deadline, adminKey);
 
-        vm.startPrank(operator);
-        _createAuctionWithAdminSignature(auction, params, adminKey);
-        vm.expectRevert(Auction.LotAlreadyRegistered.selector);
-        _createAuctionWithAdminSignature(auction, params, adminKey);
-        vm.stopPrank();
+        signedParams.highEstimate = HIGH_ESTIMATE + 1;
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.createAuction(signedParams, nonce, deadline, signature);
     }
 
-    function testCreateAuctionRevertsForInvalidRarityAllocation() external {
+    function testCreateAuctionRevertsWhenLotIdIsZero() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.lotId = bytes32(0);
+
+        _expectCreateRevert(params, "zero-lot", Auction.InvalidLotId.selector);
+    }
+
+    function testCreateAuctionRevertsWhenLotAlreadyRegistered() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        bytes32 nonce = _nonce("first");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        nonce = _nonce("duplicate");
+        bytes memory signature = _sign(params, nonce, deadline, adminKey);
+        vm.expectRevert(Auction.LotAlreadyRegistered.selector);
+        auction.createAuction(params, nonce, deadline, signature);
+    }
+
+    function testCreateAuctionRevertsWhenConsignorIsZero() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.consignor = address(0);
+
+        _expectCreateRevert(params, "zero-consignor", Auction.InvalidConsignor.selector);
+    }
+
+    function testCreateAuctionRevertsWhenEstimateIsInvalid() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.lowEstimate = 0;
+        _expectCreateRevert(params, "zero-low", Auction.InvalidEstimate.selector);
+
+        params = _defaultParams();
+        params.highEstimate = params.lowEstimate - 1;
+        _expectCreateRevert(params, "high-below-low", Auction.InvalidEstimate.selector);
+    }
+
+    function testCreateAuctionRevertsWhenStartingBidIsInvalid() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.startingBid = 0;
+        _expectCreateRevert(params, "zero-starting", Auction.InvalidStartingBid.selector);
+
+        params = _defaultParams();
+        params.startingBid = params.lowEstimate - 1;
+        _expectCreateRevert(params, "starting-below-low", Auction.InvalidStartingBid.selector);
+    }
+
+    function testCreateAuctionRevertsWhenAuctionDurationIsZero() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.auctionDurationSeconds = 0;
+
+        _expectCreateRevert(params, "zero-duration", Auction.InvalidAuctionDuration.selector);
+    }
+
+    function testCreateAuctionRevertsWhenNftConfigIsInvalid() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.nftPriceRatioBps = 0;
+        _expectCreateRevert(params, "zero-ratio", Auction.InvalidNftConfig.selector);
+
+        params = _defaultParams();
+        params.lowEstimate = 1;
+        params.highEstimate = 1;
+        params.startingBid = 1;
+        params.nftPriceRatioBps = 1;
+        _expectCreateRevert(params, "zero-price", Auction.InvalidNftConfig.selector);
+    }
+
+    function testCreateAuctionRevertsWhenRarityAllocationIsZero() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         params.designAQuantity = 0;
         params.designBQuantity = 0;
         params.designCQuantity = 0;
 
-        vm.prank(operator);
-        vm.expectRevert(Auction.InvalidRarityAllocation.selector);
-        _createAuctionWithAdminSignature(auction, params, adminKey);
+        _expectCreateRevert(params, "zero-supply", Auction.InvalidRarityAllocation.selector);
     }
 
-    function testCreateAuctionRevertsForInvalidEstimates() external {
+    function testCreateAuctionSupportsSmallSupplyMintLimitMinimumOne() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
-        params.highEstimate = params.lowEstimate - 1;
+        params.designAQuantity = 1;
+        params.designBQuantity = 0;
+        params.designCQuantity = 0;
+        bytes32 nonce = _nonce("small-supply");
+        uint256 deadline = block.timestamp + 1 hours;
 
-        vm.prank(operator);
-        vm.expectRevert(Auction.InvalidEstimate.selector);
-        _createAuctionWithAdminSignature(auction, params, adminKey);
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
+        assertEq(nft.maxSupply(), 1);
+        assertEq(nft.initialMintLimit(), 1);
     }
 
-    function testCreateAuctionRevertsForStartingBidBelowLowEstimate() external {
-        Auction.CreateAuctionParams memory params = _defaultParams();
-        params.startingBid = params.lowEstimate - 1;
-
-        vm.prank(operator);
-        vm.expectRevert(Auction.InvalidStartingBid.selector);
-        _createAuctionWithAdminSignature(auction, params, adminKey);
+    function _expectCreateRevert(Auction.CreateAuctionParams memory params, string memory nonceSeed, bytes4 selector)
+        private
+    {
+        bytes32 nonce = _nonce(nonceSeed);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _sign(params, nonce, deadline, adminKey);
+        vm.expectRevert(selector);
+        auction.createAuction(params, nonce, deadline, signature);
     }
 
     function _defaultParams() private view returns (Auction.CreateAuctionParams memory) {
         return Auction.CreateAuctionParams({
             lotId: LOT_ID,
             consignor: consignor,
-            lowEstimate: 10_000 * USDC,
-            highEstimate: 15_000 * USDC,
-            startingBid: 10_000 * USDC,
+            lowEstimate: LOW_ESTIMATE,
+            highEstimate: HIGH_ESTIMATE,
+            startingBid: STARTING_BID,
             previewDurationSeconds: 1 days,
             auctionDurationSeconds: 7 days,
             designAQuantity: 50,
@@ -149,5 +258,51 @@ contract AuctionCreateTest is AuctionCreateAuthHelper {
             thumbnailUrl: "ipfs://thumbnail",
             metadataUri: "ipfs://metadata/"
         });
+    }
+
+    function _nonce(string memory seed) private pure returns (bytes32) {
+        return keccak256(bytes(seed));
+    }
+
+    function _sign(Auction.CreateAuctionParams memory params, bytes32 nonce, uint256 deadline, uint256 signerKey)
+        private
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.CREATE_AUCTION_AUTHORIZATION_TYPEHASH(),
+                params.lotId,
+                params.consignor,
+                params.lowEstimate,
+                params.highEstimate,
+                params.startingBid,
+                params.previewDurationSeconds,
+                params.auctionDurationSeconds,
+                params.designAQuantity,
+                params.designBQuantity,
+                params.designCQuantity,
+                params.nftPriceRatioBps,
+                keccak256(bytes(params.nftName)),
+                keccak256(bytes(params.nftSymbol)),
+                keccak256(bytes(params.thumbnailUrl)),
+                keccak256(bytes(params.metadataUri)),
+                nonce,
+                deadline
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("NextVaultAuction")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(auction)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+
+        return abi.encodePacked(r, s, v);
     }
 }
