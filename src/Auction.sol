@@ -103,6 +103,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error AuctionPaymentAlreadyCollected();
     error AuctionIsCancelled();
     error AuctionHasNoWinner();
+    error UnauthorizedPaymentCollector();
     error AuctionNotEnded();
     error AuctionNotActive();
     error InvalidQuantity();
@@ -469,13 +470,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         endedAuctions[lotId] = true;
         winner = itemToCurrentBidder[lotId];
         winningBid = itemToCurrentBid[lotId];
-        paymentCollected = _tryCollectWinnerPayment(lotId, winner, winningBid);
+        paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
         emit AuctionEnded(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
 
-    function _tryCollectWinnerPayment(bytes32 lotId, address winner, uint256 winningBid) internal returns (bool) {
+    function _trySettleAuctionPayment(bytes32 lotId, address winner, uint256 winningBid) internal returns (bool) {
         if (winner == address(0)) return false;
         if (treasury == address(0)) revert InvalidSettlementConfig();
 
@@ -516,16 +517,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return true;
     }
 
-    function collectWinnerPayment(bytes32 lotId) external onlyRole(OPERATOR_ROLE) returns (bool paymentCollected) {
+    function settleAuctionPayment(bytes32 lotId) external returns (bool paymentCollected) {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (!endedAuctions[lotId]) revert AuctionNotEnded();
         if (auctionPaymentCollected[lotId]) revert AuctionPaymentAlreadyCollected();
 
         address winner = itemToCurrentBidder[lotId];
         if (winner == address(0)) revert AuctionHasNoWinner();
+        if (msg.sender != winner && !hasRole(OPERATOR_ROLE, msg.sender)) revert UnauthorizedPaymentCollector();
 
         uint256 winningBid = itemToCurrentBid[lotId];
-        paymentCollected = _tryCollectWinnerPayment(lotId, winner, winningBid);
+        paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);

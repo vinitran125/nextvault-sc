@@ -105,7 +105,7 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(token.balanceOf(address(auction)), NFT_PRICE);
     }
 
-    function testCollectWinnerPaymentSucceedsAfterInitialEndFailure() external {
+    function testSettleAuctionPaymentSucceedsForOperatorAfterInitialEndFailure() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         vm.warp(config.endTime);
@@ -118,22 +118,53 @@ contract AuctionEndWithdrawTest is Test {
         vm.expectEmit(true, true, false, true, address(auction));
         emit WinnerPaymentCollected(LOT_ID, bidderA, STARTING_BID, true, block.timestamp);
         vm.prank(operator);
-        bool paymentCollected = auction.collectWinnerPayment(LOT_ID);
+        bool paymentCollected = auction.settleAuctionPayment(LOT_ID);
 
         assertTrue(paymentCollected);
         assertTrue(auction.auctionPaymentCollected(LOT_ID));
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Finalized));
     }
 
-    function testCollectWinnerPaymentCanRetryWithoutChangingWinnerWhenStillUnavailable() external {
+    function testSettleAuctionPaymentSucceedsForWinnerAfterInitialEndFailure() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        _approveRemainingPayment(bidderA, STARTING_BID);
+
+        vm.prank(bidderA);
+        bool paymentCollected = auction.settleAuctionPayment(LOT_ID);
+
+        assertTrue(paymentCollected);
+        assertTrue(auction.auctionPaymentCollected(LOT_ID));
+        assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Finalized));
+    }
+
+    function testSettleAuctionPaymentRevertsForUnauthorizedCaller() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        vm.prank(stranger);
+        vm.expectRevert(Auction.UnauthorizedPaymentCollector.selector);
+        auction.settleAuctionPayment(LOT_ID);
+    }
+
+    function testSettleAuctionPaymentCanRetryWithoutChangingWinnerWhenStillUnavailable() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         vm.warp(config.endTime);
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
-        bool firstRetry = auction.collectWinnerPayment(LOT_ID);
-        bool secondRetry = auction.collectWinnerPayment(LOT_ID);
+        bool firstRetry = auction.settleAuctionPayment(LOT_ID);
+        bool secondRetry = auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
         assertFalse(firstRetry);
@@ -197,26 +228,26 @@ contract AuctionEndWithdrawTest is Test {
         auction.endAuction(UNKNOWN_LOT_ID);
     }
 
-    function testCollectWinnerPaymentRevertsBeforeAuctionIsEnded() external {
+    function testSettleAuctionPaymentRevertsBeforeAuctionIsEnded() external {
         _createAuction(0);
 
         vm.prank(operator);
         vm.expectRevert(Auction.AuctionNotEnded.selector);
-        auction.collectWinnerPayment(LOT_ID);
+        auction.settleAuctionPayment(LOT_ID);
     }
 
-    function testCollectWinnerPaymentRevertsWhenAuctionHasNoWinner() external {
+    function testSettleAuctionPaymentRevertsWhenAuctionHasNoWinner() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         vm.warp(config.endTime);
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
         vm.expectRevert(Auction.AuctionHasNoWinner.selector);
-        auction.collectWinnerPayment(LOT_ID);
+        auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
     }
 
-    function testCollectWinnerPaymentRevertsAfterPaymentWasCollected() external {
+    function testSettleAuctionPaymentRevertsAfterPaymentWasCollected() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         _approveRemainingPayment(bidderA, STARTING_BID);
@@ -225,7 +256,7 @@ contract AuctionEndWithdrawTest is Test {
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
         vm.expectRevert(Auction.AuctionPaymentAlreadyCollected.selector);
-        auction.collectWinnerPayment(LOT_ID);
+        auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
     }
 
