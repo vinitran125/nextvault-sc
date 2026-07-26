@@ -82,7 +82,7 @@ contract AuctionFullFlowTest is Test {
 
         _approveRemainingPayment(bidderC, winningBid);
         vm.prank(operator);
-        bool collectedAfterRetry = auction.collectWinnerPayment(LOT_ID);
+        bool collectedAfterRetry = auction.settleAuctionPayment(LOT_ID);
 
         assertTrue(collectedAfterRetry);
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Finalized));

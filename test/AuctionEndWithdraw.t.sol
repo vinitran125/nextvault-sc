@@ -105,7 +105,72 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(token.balanceOf(address(auction)), NFT_PRICE);
     }
 
-    function testCollectWinnerPaymentSucceedsAfterInitialEndFailure() external {
+    function testEndAuctionUsesMaxBidDepositWhenHammerPriceIsLowerThanMaxBid() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNft(bidderA);
+        _setMaxBidAndPlaceFor(bidderA, 12_000 * USDC, 11_000 * USDC);
+
+        uint256 remainingPayment = 10_900 * USDC;
+        vm.prank(bidderA);
+        token.approve(address(auction), remainingPayment);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, 11_000 * USDC);
+        assertTrue(paymentCollected);
+        assertEq(token.balanceOf(consignor), 9_900 * USDC);
+        assertEq(token.balanceOf(admin), 2_200 * USDC);
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testEndAuctionUsesExactTicketMaxBidDepositNumbers() external {
+        Auction.AuctionConfig memory config = _createAuctionWithStartingBid(0, 1_000 * USDC);
+        _buyNft(bidderA);
+        _setMaxBidAndPlaceFor(bidderA, 1_200 * USDC, 1_100 * USDC);
+
+        uint256 bidderBalanceBeforeEnd = token.balanceOf(bidderA);
+        uint256 remainingPayment = 1_090 * USDC;
+        vm.prank(bidderA);
+        token.approve(address(auction), remainingPayment);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, 1_100 * USDC);
+        assertTrue(paymentCollected);
+        assertEq(bidderBalanceBeforeEnd - token.balanceOf(bidderA), remainingPayment);
+        assertEq(token.balanceOf(consignor), 990 * USDC);
+        assertEq(token.balanceOf(admin), 220 * USDC);
+        assertEq(token.balanceOf(address(auction)), 1 * USDC);
+    }
+
+    function testEndAuctionRefundsExcessMaxBidDepositWhenDepositExceedsTotalPayment() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNft(bidderA);
+        _setMaxBidAndPlaceFor(bidderA, 120_000 * USDC, STARTING_BID);
+        uint256 bidderBalanceBeforeEnd = token.balanceOf(bidderA);
+        vm.warp(config.endTime);
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit MaxBidRefunded(LOT_ID, bidderA, 1_000 * USDC, block.timestamp);
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, STARTING_BID);
+        assertTrue(paymentCollected);
+        assertEq(token.balanceOf(bidderA), bidderBalanceBeforeEnd + 1_000 * USDC);
+        assertEq(token.balanceOf(consignor), 9_000 * USDC);
+        assertEq(token.balanceOf(admin), 2_000 * USDC);
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testSettleAuctionPaymentSucceedsForOperatorAfterInitialEndFailure() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         vm.warp(config.endTime);
@@ -118,22 +183,53 @@ contract AuctionEndWithdrawTest is Test {
         vm.expectEmit(true, true, false, true, address(auction));
         emit WinnerPaymentCollected(LOT_ID, bidderA, STARTING_BID, true, block.timestamp);
         vm.prank(operator);
-        bool paymentCollected = auction.collectWinnerPayment(LOT_ID);
+        bool paymentCollected = auction.settleAuctionPayment(LOT_ID);
 
         assertTrue(paymentCollected);
         assertTrue(auction.auctionPaymentCollected(LOT_ID));
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Finalized));
     }
 
-    function testCollectWinnerPaymentCanRetryWithoutChangingWinnerWhenStillUnavailable() external {
+    function testSettleAuctionPaymentSucceedsForWinnerAfterInitialEndFailure() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        _approveRemainingPayment(bidderA, STARTING_BID);
+
+        vm.prank(bidderA);
+        bool paymentCollected = auction.settleAuctionPayment(LOT_ID);
+
+        assertTrue(paymentCollected);
+        assertTrue(auction.auctionPaymentCollected(LOT_ID));
+        assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Finalized));
+    }
+
+    function testSettleAuctionPaymentRevertsForUnauthorizedCaller() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        vm.prank(stranger);
+        vm.expectRevert(Auction.UnauthorizedPaymentCollector.selector);
+        auction.settleAuctionPayment(LOT_ID);
+    }
+
+    function testSettleAuctionPaymentCanRetryWithoutChangingWinnerWhenStillUnavailable() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         vm.warp(config.endTime);
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
-        bool firstRetry = auction.collectWinnerPayment(LOT_ID);
-        bool secondRetry = auction.collectWinnerPayment(LOT_ID);
+        bool firstRetry = auction.settleAuctionPayment(LOT_ID);
+        bool secondRetry = auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
         assertFalse(firstRetry);
@@ -197,26 +293,26 @@ contract AuctionEndWithdrawTest is Test {
         auction.endAuction(UNKNOWN_LOT_ID);
     }
 
-    function testCollectWinnerPaymentRevertsBeforeAuctionIsEnded() external {
+    function testSettleAuctionPaymentRevertsBeforeAuctionIsEnded() external {
         _createAuction(0);
 
         vm.prank(operator);
         vm.expectRevert(Auction.AuctionNotEnded.selector);
-        auction.collectWinnerPayment(LOT_ID);
+        auction.settleAuctionPayment(LOT_ID);
     }
 
-    function testCollectWinnerPaymentRevertsWhenAuctionHasNoWinner() external {
+    function testSettleAuctionPaymentRevertsWhenAuctionHasNoWinner() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         vm.warp(config.endTime);
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
         vm.expectRevert(Auction.AuctionHasNoWinner.selector);
-        auction.collectWinnerPayment(LOT_ID);
+        auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
     }
 
-    function testCollectWinnerPaymentRevertsAfterPaymentWasCollected() external {
+    function testSettleAuctionPaymentRevertsAfterPaymentWasCollected() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         _approveRemainingPayment(bidderA, STARTING_BID);
@@ -225,7 +321,7 @@ contract AuctionEndWithdrawTest is Test {
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
         vm.expectRevert(Auction.AuctionPaymentAlreadyCollected.selector);
-        auction.collectWinnerPayment(LOT_ID);
+        auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
     }
 
@@ -386,12 +482,19 @@ contract AuctionEndWithdrawTest is Test {
     }
 
     function _createAuction(uint256 previewDuration) private returns (Auction.AuctionConfig memory) {
+        return _createAuctionWithStartingBid(previewDuration, STARTING_BID);
+    }
+
+    function _createAuctionWithStartingBid(uint256 previewDuration, uint256 startingBid)
+        private
+        returns (Auction.AuctionConfig memory)
+    {
         Auction.CreateAuctionParams memory params = Auction.CreateAuctionParams({
             lotId: LOT_ID,
             consignor: consignor,
-            lowEstimate: STARTING_BID,
+            lowEstimate: startingBid,
             highEstimate: 20_000 * USDC,
-            startingBid: STARTING_BID,
+            startingBid: startingBid,
             previewDurationSeconds: previewDuration,
             auctionDurationSeconds: 1 hours,
             designAQuantity: 50,

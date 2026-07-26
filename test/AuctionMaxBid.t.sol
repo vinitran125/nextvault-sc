@@ -146,6 +146,19 @@ contract AuctionMaxBidTest is Test {
         auction.setMaxBid(LOT_ID, STARTING_BID);
     }
 
+    function testSetMaxBidRevertsWhenAmountEqualsExistingMaxBid() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _approveBidDeposit(bidderA, 15_000 * USDC);
+
+        vm.prank(bidderA);
+        auction.setMaxBid(LOT_ID, 15_000 * USDC);
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidBidAmount.selector);
+        auction.setMaxBid(LOT_ID, 15_000 * USDC);
+    }
+
     function testPlaceBidForAllowsOperatorToBidForRegisteredMaxBidder() external {
         _createActiveAuction();
         _buyNft(bidderA, 1);

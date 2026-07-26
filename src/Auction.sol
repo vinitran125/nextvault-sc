@@ -103,6 +103,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error AuctionPaymentAlreadyCollected();
     error AuctionIsCancelled();
     error AuctionHasNoWinner();
+    error UnauthorizedPaymentCollector();
     error AuctionNotEnded();
     error AuctionNotActive();
     error InvalidQuantity();
@@ -119,8 +120,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidItemDepositStatus();
     error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
+    error AuctionDetailsLocked();
 
     event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
+    event AuctionDetailsUpdated(
+        bytes32 indexed lotId,
+        address indexed consignor,
+        uint256 lowEstimate,
+        uint256 highEstimate,
+        string thumbnailUrl,
+        uint256 blockTimestamp
+    );
     event AuctionWithdrawn(bytes32 indexed lotId, address indexed highestBidder, uint256 blockTimestamp);
     event AuctionEnded(
         bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
@@ -310,6 +320,34 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return params.lotId;
     }
 
+    function updateAuctionDetails(
+        bytes32 lotId,
+        address consignor,
+        uint256 lowEstimate,
+        uint256 highEstimate,
+        string calldata thumbnailUrl
+    ) external onlyRole(OPERATOR_ROLE) {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (consignor == address(0)) revert InvalidConsignor();
+        if (lowEstimate == 0 || highEstimate < lowEstimate) revert InvalidEstimate();
+
+        AuctionConfig storage auction = auctions[lotId];
+        AuctionStatus status = _currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime);
+        if (
+            cancelledAuctions[lotId] || endedAuctions[lotId] || auctionPaymentCollected[lotId]
+                || (status != AuctionStatus.Preview && status != AuctionStatus.Active)
+        ) {
+            revert AuctionDetailsLocked();
+        }
+
+        auction.consignor = consignor;
+        auction.lowEstimate = lowEstimate;
+        auction.highEstimate = highEstimate;
+        auction.thumbnailUrl = thumbnailUrl;
+
+        emit AuctionDetailsUpdated(lotId, consignor, lowEstimate, highEstimate, thumbnailUrl, block.timestamp);
+    }
+
     function buyNFT(bytes32 lotId, uint256 quantity) external {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         AuctionConfig memory auction = auctions[lotId];
@@ -365,14 +403,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         }
         if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
 
-        uint256 currentBid = itemToCurrentBid[lotId];
-        uint256 validBid = currentBid == 0 ? auction.startingBid : currentBid + _bidIncrementFor(currentBid);
-        if (amount < validBid) revert InvalidBidAmount();
-
-        while (validBid < amount) {
-            validBid += _bidIncrementFor(validBid);
-        }
-        if (validBid != amount) revert InvalidBidAmount();
+        uint256 currentBid = _validateBidOnLadder(lotId, auction.startingBid, amount);
 
         if (amount > itemBidderToMaxBid[lotId][bidder]) revert InvalidBidAmount();
 
@@ -396,19 +427,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         }
         if (LotNFT(auction.nftCollection).balanceOf(msg.sender) == 0) revert NotEligibleToBid();
 
-        uint256 currentBid = itemToCurrentBid[lotId];
-        uint256 validBid = currentBid == 0 ? auction.startingBid : currentBid + _bidIncrementFor(currentBid);
-        if (amount < validBid) revert InvalidBidAmount();
-
-        while (validBid < amount) {
-            validBid += _bidIncrementFor(validBid);
-        }
-        if (validBid != amount) revert InvalidBidAmount();
+        _validateBidOnLadder(lotId, auction.startingBid, amount);
 
         if (itemToCurrentBid[lotId] > amount) revert InvalidBidAmount();
 
         uint256 previousMaxBid = itemBidderToMaxBid[lotId][msg.sender];
-        if (amount < previousMaxBid) revert InvalidBidAmount();
+        if (amount <= previousMaxBid) revert InvalidBidAmount();
 
         uint256 requiredDeposit = amount / 10;
         uint256 previousDeposit = previousMaxBid / 10;
@@ -469,19 +493,20 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         endedAuctions[lotId] = true;
         winner = itemToCurrentBidder[lotId];
         winningBid = itemToCurrentBid[lotId];
-        paymentCollected = _tryCollectWinnerPayment(lotId, winner, winningBid);
+        paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
         emit AuctionEnded(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
 
-    function _tryCollectWinnerPayment(bytes32 lotId, address winner, uint256 winningBid) internal returns (bool) {
+    function _trySettleAuctionPayment(bytes32 lotId, address winner, uint256 winningBid) internal returns (bool) {
         if (winner == address(0)) return false;
         if (treasury == address(0)) revert InvalidSettlementConfig();
-
         uint256 buyerPremium = (winningBid * buyerPremiumBps) / BPS_DENOMINATOR;
         uint256 totalPayment = winningBid + buyerPremium;
-        uint256 remainingPayment = totalPayment - winningBid / 10;
+        uint256 deposited = itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][winner] / 10 : winningBid / 10;
+        uint256 remainingPayment = totalPayment > deposited ? totalPayment - deposited : 0;
+        uint256 excessDeposit = deposited > totalPayment ? deposited - totalPayment : 0;
         if (token.balanceOf(winner) < remainingPayment || token.allowance(winner, address(this)) < remainingPayment) {
             return false;
         }
@@ -492,6 +517,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             } catch {
                 return false;
             }
+        }
+        if (excessDeposit > 0) {
+            token.safeTransfer(winner, excessDeposit);
+            emit MaxBidRefunded(lotId, winner, excessDeposit, block.timestamp);
         }
 
         AuctionConfig storage auction = auctions[lotId];
@@ -516,16 +545,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return true;
     }
 
-    function collectWinnerPayment(bytes32 lotId) external onlyRole(OPERATOR_ROLE) returns (bool paymentCollected) {
+    function settleAuctionPayment(bytes32 lotId) external returns (bool paymentCollected) {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (!endedAuctions[lotId]) revert AuctionNotEnded();
         if (auctionPaymentCollected[lotId]) revert AuctionPaymentAlreadyCollected();
 
         address winner = itemToCurrentBidder[lotId];
         if (winner == address(0)) revert AuctionHasNoWinner();
+        if (msg.sender != winner && !hasRole(OPERATOR_ROLE, msg.sender)) revert UnauthorizedPaymentCollector();
 
         uint256 winningBid = itemToCurrentBid[lotId];
-        paymentCollected = _tryCollectWinnerPayment(lotId, winner, winningBid);
+        paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
@@ -744,5 +774,18 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             return 200_000 * tokenDecimal;
         }
         return 500_000 * tokenDecimal;
+    }
+
+    function _validateBidOnLadder(bytes32 lotId, uint256 startingBid, uint256 amount) internal view returns (uint256) {
+        uint256 currentBid = itemToCurrentBid[lotId];
+        uint256 validBid = currentBid == 0 ? startingBid : currentBid + _bidIncrementFor(currentBid);
+        if (amount < validBid) revert InvalidBidAmount();
+
+        while (validBid < amount) {
+            validBid += _bidIncrementFor(validBid);
+        }
+        if (validBid != amount) revert InvalidBidAmount();
+
+        return currentBid;
     }
 }
