@@ -105,6 +105,71 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(token.balanceOf(address(auction)), NFT_PRICE);
     }
 
+    function testEndAuctionUsesMaxBidDepositWhenHammerPriceIsLowerThanMaxBid() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNft(bidderA);
+        _setMaxBidAndPlaceFor(bidderA, 12_000 * USDC, 11_000 * USDC);
+
+        uint256 remainingPayment = 10_900 * USDC;
+        vm.prank(bidderA);
+        token.approve(address(auction), remainingPayment);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, 11_000 * USDC);
+        assertTrue(paymentCollected);
+        assertEq(token.balanceOf(consignor), 9_900 * USDC);
+        assertEq(token.balanceOf(admin), 2_200 * USDC);
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testEndAuctionUsesExactTicketMaxBidDepositNumbers() external {
+        Auction.AuctionConfig memory config = _createAuctionWithStartingBid(0, 1_000 * USDC);
+        _buyNft(bidderA);
+        _setMaxBidAndPlaceFor(bidderA, 1_200 * USDC, 1_100 * USDC);
+
+        uint256 bidderBalanceBeforeEnd = token.balanceOf(bidderA);
+        uint256 remainingPayment = 1_090 * USDC;
+        vm.prank(bidderA);
+        token.approve(address(auction), remainingPayment);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, 1_100 * USDC);
+        assertTrue(paymentCollected);
+        assertEq(bidderBalanceBeforeEnd - token.balanceOf(bidderA), remainingPayment);
+        assertEq(token.balanceOf(consignor), 990 * USDC);
+        assertEq(token.balanceOf(admin), 220 * USDC);
+        assertEq(token.balanceOf(address(auction)), 1 * USDC);
+    }
+
+    function testEndAuctionRefundsExcessMaxBidDepositWhenDepositExceedsTotalPayment() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNft(bidderA);
+        _setMaxBidAndPlaceFor(bidderA, 120_000 * USDC, STARTING_BID);
+        uint256 bidderBalanceBeforeEnd = token.balanceOf(bidderA);
+        vm.warp(config.endTime);
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit MaxBidRefunded(LOT_ID, bidderA, 1_000 * USDC, block.timestamp);
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, STARTING_BID);
+        assertTrue(paymentCollected);
+        assertEq(token.balanceOf(bidderA), bidderBalanceBeforeEnd + 1_000 * USDC);
+        assertEq(token.balanceOf(consignor), 9_000 * USDC);
+        assertEq(token.balanceOf(admin), 2_000 * USDC);
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
     function testSettleAuctionPaymentSucceedsForOperatorAfterInitialEndFailure() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
@@ -417,12 +482,19 @@ contract AuctionEndWithdrawTest is Test {
     }
 
     function _createAuction(uint256 previewDuration) private returns (Auction.AuctionConfig memory) {
+        return _createAuctionWithStartingBid(previewDuration, STARTING_BID);
+    }
+
+    function _createAuctionWithStartingBid(uint256 previewDuration, uint256 startingBid)
+        private
+        returns (Auction.AuctionConfig memory)
+    {
         Auction.CreateAuctionParams memory params = Auction.CreateAuctionParams({
             lotId: LOT_ID,
             consignor: consignor,
-            lowEstimate: STARTING_BID,
+            lowEstimate: startingBid,
             highEstimate: 20_000 * USDC,
-            startingBid: STARTING_BID,
+            startingBid: startingBid,
             previewDurationSeconds: previewDuration,
             auctionDurationSeconds: 1 hours,
             designAQuantity: 50,
