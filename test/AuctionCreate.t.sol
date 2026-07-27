@@ -171,7 +171,7 @@ contract AuctionCreateTest is Test {
         LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
         assertEq(nft.balanceOf(buyer), 5);
         assertEq(nft.variantOf(1), 0);
-        assertEq(nft.tokenURI(1), "");
+        assertEq(nft.tokenURI(1), "ipfs://metadata/1");
 
         NFTDesignManager.VariantRequest memory request = designManager.getVariantRequest(1);
         assertEq(request.lotId, LOT_ID);
@@ -185,11 +185,11 @@ contract AuctionCreateTest is Test {
         request = designManager.getVariantRequest(1);
         assertTrue(request.fulfilled);
         assertTrue(nft.variantOf(1) != 0);
-        assertEq(nft.tokenURI(1), string.concat("ipfs://metadata/", vm.toString(nft.variantOf(1))));
+        assertEq(nft.tokenURI(5), "ipfs://metadata/5");
         assertEq(nft.variant1Remaining() + nft.variant2Remaining() + nft.variant3Remaining(), 95);
     }
 
-    function testTokenUriUsesVariantNumberInsteadOfMintSequence() external {
+    function testTokenUriUsesTokenIdAfterVariantAssignment() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         params.previewDurationSeconds = 0;
         params.variant1Quantity = 0;
@@ -207,12 +207,12 @@ contract AuctionCreateTest is Test {
         vm.stopPrank();
 
         LotNFT nft = LotNFT(config.nftCollection);
-        assertEq(nft.tokenURI(1), "");
+        assertEq(nft.tokenURI(1), "ipfs://metadata/1");
 
         vrf.fulfill(1, 123);
 
         assertEq(nft.variantOf(1), 2);
-        assertEq(nft.tokenURI(1), "ipfs://metadata/2");
+        assertEq(nft.tokenURI(1), "ipfs://metadata/1");
     }
 
     function testVrfFulfillmentEmitsDesignUpdateFromAuction() external {

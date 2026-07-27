@@ -178,12 +178,10 @@ contract LotNFT is Initializable, ERC721Upgradeable {
     }
 
     /// @notice Returns the metadata URI for a token.
-    /// @dev Returns an empty URI while VRF assignment is pending, then builds baseTokenURI + variant number.
+    /// @dev Builds the token URI from the base URI and token ID, regardless of variant assignment.
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);
-        uint8 variant = variantOf[tokenId];
-        if (bytes(baseTokenURI).length == 0 || variant == 0) return "";
-        return string.concat(baseTokenURI, Strings.toString(variant));
+        return string.concat(baseTokenURI, Strings.toString(tokenId));
     }
 
     function _update(address to, uint256 tokenId, address auth) internal override returns (address from) {
