@@ -9,7 +9,7 @@ import {IVRFCoordinatorV2Plus, VRFV2PlusClient} from "./interfaces/IVRFCoordinat
 contract NFTDesignManager is Ownable {
     using Clones for address;
 
-    struct DesignRequest {
+    struct VariantRequest {
         bytes32 lotId;
         address buyer;
         address nftCollection;
@@ -22,7 +22,7 @@ contract NFTDesignManager is Ownable {
     error InvalidConfig();
     error AlreadyInitialized();
     error OnlyVRFCoordinator();
-    error InvalidDesignRequest();
+    error InvalidVariantRequest();
 
     event VRFConfigUpdated(
         address indexed coordinator,
@@ -32,7 +32,7 @@ contract NFTDesignManager is Ownable {
         uint16 requestConfirmations,
         bool nativePayment
     );
-    event NFTDesignRandomnessRequested(
+    event NFTVariantRandomnessRequested(
         bytes32 indexed lotId,
         address indexed buyer,
         uint256 indexed requestId,
@@ -40,10 +40,8 @@ contract NFTDesignManager is Ownable {
         uint256 firstTokenId,
         uint256 quantity
     );
-    event NFTDesignAssigned(
-        bytes32 indexed lotId, uint256 indexed requestId, uint256 indexed tokenId, LotNFT.Design design
-    );
-    event WinnerDesignMinted(bytes32 indexed lotId, address indexed winner, uint256 indexed tokenId);
+    event NFTVariantAssigned(bytes32 indexed lotId, uint256 indexed requestId, uint256 indexed tokenId, uint8 variant);
+    event WinnerVariantMinted(bytes32 indexed lotId, address indexed winner, uint256 indexed tokenId);
     event LotNFTCreated(bytes32 indexed lotId, address indexed nftCollection);
     event AuctionInitialized(address indexed auction);
 
@@ -56,7 +54,7 @@ contract NFTDesignManager is Ownable {
     uint16 public vrfRequestConfirmations;
     bool public vrfNativePayment;
 
-    mapping(uint256 => DesignRequest) private designRequests;
+    mapping(uint256 => VariantRequest) private variantRequests;
 
     constructor(
         address admin,
@@ -91,10 +89,13 @@ contract NFTDesignManager is Ownable {
         _setVRFConfig(coordinator, subscriptionId, keyHash, callbackGasLimit, requestConfirmations, nativePayment);
     }
 
-    function requestDesigns(bytes32 lotId, address buyer, address nftCollection, uint256 firstTokenId, uint256 quantity)
-        external
-        returns (uint256 requestId)
-    {
+    function requestVariants(
+        bytes32 lotId,
+        address buyer,
+        address nftCollection,
+        uint256 firstTokenId,
+        uint256 quantity
+    ) external returns (uint256 requestId) {
         if (msg.sender != auction) revert OnlyAuction();
 
         requestId = IVRFCoordinatorV2Plus(vrfCoordinator)
@@ -110,7 +111,7 @@ contract NFTDesignManager is Ownable {
                     )
                 })
             );
-        designRequests[requestId] = DesignRequest({
+        variantRequests[requestId] = VariantRequest({
             lotId: lotId,
             buyer: buyer,
             nftCollection: nftCollection,
@@ -119,7 +120,7 @@ contract NFTDesignManager is Ownable {
             fulfilled: false
         });
 
-        emit NFTDesignRandomnessRequested(lotId, buyer, requestId, nftCollection, firstTokenId, quantity);
+        emit NFTVariantRandomnessRequested(lotId, buyer, requestId, nftCollection, firstTokenId, quantity);
     }
 
     function createLotNFT(
@@ -128,9 +129,9 @@ contract NFTDesignManager is Ownable {
         string calldata baseTokenURI,
         bytes32 lotId,
         uint256 maxSupply,
-        uint256 designAQuantity,
-        uint256 designBQuantity,
-        uint256 designCQuantity
+        uint256 variant1Quantity,
+        uint256 variant2Quantity,
+        uint256 variant3Quantity
     ) external returns (address nftCollection) {
         if (msg.sender != auction) revert OnlyAuction();
 
@@ -142,9 +143,9 @@ contract NFTDesignManager is Ownable {
                 baseTokenURI,
                 lotId,
                 maxSupply,
-                designAQuantity,
-                designBQuantity,
-                designCQuantity,
+                variant1Quantity,
+                variant2Quantity,
+                variant3Quantity,
                 auction,
                 address(this)
             );
@@ -154,27 +155,30 @@ contract NFTDesignManager is Ownable {
     function rawFulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) external {
         if (msg.sender != vrfCoordinator) revert OnlyVRFCoordinator();
 
-        DesignRequest storage request = designRequests[requestId];
-        if (request.quantity == 0 || request.fulfilled || randomWords.length == 0) revert InvalidDesignRequest();
+        VariantRequest storage request = variantRequests[requestId];
+        if (request.quantity == 0 || request.fulfilled || randomWords.length == 0) revert InvalidVariantRequest();
         request.fulfilled = true;
 
         LotNFT nft = LotNFT(request.nftCollection);
         for (uint256 i = 0; i < request.quantity; i++) {
             uint256 tokenId = request.firstTokenId + i;
             uint256 randomWord = uint256(keccak256(abi.encode(randomWords[0], requestId, i)));
-            LotNFT.Design design = nft.assignRandomDesign(tokenId, randomWord);
-            emit NFTDesignAssigned(request.lotId, requestId, tokenId, design);
+            uint8 variant = nft.assignRandomVariant(tokenId, randomWord);
+            emit NFTVariantAssigned(request.lotId, requestId, tokenId, variant);
         }
     }
 
-    function mintWinnerDesign(bytes32 lotId, address nftCollection, address winner) external returns (uint256 tokenId) {
+    function mintWinnerVariant(bytes32 lotId, address nftCollection, address winner)
+        external
+        returns (uint256 tokenId)
+    {
         if (msg.sender != auction) revert OnlyAuction();
-        tokenId = LotNFT(nftCollection).mintWinnerDesign(winner);
-        emit WinnerDesignMinted(lotId, winner, tokenId);
+        tokenId = LotNFT(nftCollection).mintWinnerVariant(winner);
+        emit WinnerVariantMinted(lotId, winner, tokenId);
     }
 
-    function getDesignRequest(uint256 requestId) external view returns (DesignRequest memory) {
-        return designRequests[requestId];
+    function getVariantRequest(uint256 requestId) external view returns (VariantRequest memory) {
+        return variantRequests[requestId];
     }
 
     function _setVRFConfig(

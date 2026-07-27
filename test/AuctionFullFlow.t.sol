@@ -105,7 +105,7 @@ contract AuctionFullFlowTest is Test {
 
         LotNFT nft = LotNFT(config.nftCollection);
         assertEq(nft.ownerOf(config.nftMaxSupply + 1), bidderC);
-        assertEq(uint256(nft.designOf(config.nftMaxSupply + 1)), uint256(LotNFT.Design.D));
+        assertEq(nft.variantOf(config.nftMaxSupply + 1), 4);
     }
 
     function testFullFlowAutoBidWinnerPaysImmediatelyAtAuctionEnd() external {
@@ -208,9 +208,9 @@ contract AuctionFullFlowTest is Test {
             startingBid: STARTING_BID,
             previewDurationSeconds: previewDuration,
             auctionDurationSeconds: 1 hours,
-            designAQuantity: 50,
-            designBQuantity: 30,
-            designCQuantity: 20,
+            variant1Quantity: 50,
+            variant2Quantity: 30,
+            variant3Quantity: 20,
             nftPriceRatioBps: 1_000,
             nftName: "NextVault Lot 1",
             nftSymbol: "NVL1",
@@ -271,9 +271,9 @@ contract AuctionFullFlowTest is Test {
                 params.startingBid,
                 params.previewDurationSeconds,
                 params.auctionDurationSeconds,
-                params.designAQuantity,
-                params.designBQuantity,
-                params.designCQuantity,
+                params.variant1Quantity,
+                params.variant2Quantity,
+                params.variant3Quantity,
                 params.nftPriceRatioBps,
                 keccak256(bytes(params.nftName)),
                 keccak256(bytes(params.nftSymbol)),

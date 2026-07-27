@@ -9,7 +9,7 @@ contract CreateAuctionScript is Script {
         Auction auction = Auction(vm.envAddress("AUCTION_ADDRESS"));
 
         string memory lotIdText = vm.envString("LOT_ID");
-        lotId = keccak256(bytes(lotIdText));
+        lotId = vm.envBytes32("LOT_ID_BYTES32");
 
         Auction.CreateAuctionParams memory params = Auction.CreateAuctionParams({
             lotId: lotId,
@@ -19,9 +19,9 @@ contract CreateAuctionScript is Script {
             startingBid: vm.envUint("STARTING_BID"),
             previewDurationSeconds: vm.envUint("PREVIEW_DURATION_SECONDS"),
             auctionDurationSeconds: vm.envUint("AUCTION_DURATION_SECONDS"),
-            designAQuantity: vm.envUint("DESIGN_A_QUANTITY"),
-            designBQuantity: vm.envUint("DESIGN_B_QUANTITY"),
-            designCQuantity: vm.envUint("DESIGN_C_QUANTITY"),
+            variant1Quantity: vm.envUint("VARIANT_1_QUANTITY"),
+            variant2Quantity: vm.envUint("VARIANT_2_QUANTITY"),
+            variant3Quantity: vm.envUint("VARIANT_3_QUANTITY"),
             nftPriceRatioBps: uint16(vm.envUint("NFT_PRICE_RATIO_BPS")),
             nftName: vm.envString("NFT_NAME"),
             nftSymbol: vm.envString("NFT_SYMBOL"),
@@ -66,9 +66,9 @@ contract CreateAuctionScript is Script {
                 params.startingBid,
                 params.previewDurationSeconds,
                 params.auctionDurationSeconds,
-                params.designAQuantity,
-                params.designBQuantity,
-                params.designCQuantity,
+                params.variant1Quantity,
+                params.variant2Quantity,
+                params.variant3Quantity,
                 params.nftPriceRatioBps,
                 keccak256(bytes(params.nftName)),
                 keccak256(bytes(params.nftSymbol)),

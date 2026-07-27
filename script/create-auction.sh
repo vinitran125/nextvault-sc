@@ -20,14 +20,17 @@ fi
 : "${STARTING_BID:?STARTING_BID is required}"
 : "${PREVIEW_DURATION_SECONDS:?PREVIEW_DURATION_SECONDS is required}"
 : "${AUCTION_DURATION_SECONDS:?AUCTION_DURATION_SECONDS is required}"
-: "${DESIGN_A_QUANTITY:?DESIGN_A_QUANTITY is required}"
-: "${DESIGN_B_QUANTITY:?DESIGN_B_QUANTITY is required}"
-: "${DESIGN_C_QUANTITY:?DESIGN_C_QUANTITY is required}"
+: "${VARIANT_1_QUANTITY:?VARIANT_1_QUANTITY is required}"
+: "${VARIANT_2_QUANTITY:?VARIANT_2_QUANTITY is required}"
+: "${VARIANT_3_QUANTITY:?VARIANT_3_QUANTITY is required}"
 : "${NFT_PRICE_RATIO_BPS:?NFT_PRICE_RATIO_BPS is required}"
 : "${NFT_NAME:?NFT_NAME is required}"
 : "${NFT_SYMBOL:?NFT_SYMBOL is required}"
 : "${THUMBNAIL_URL:?THUMBNAIL_URL is required}"
 : "${METADATA_URI:?METADATA_URI is required}"
+
+LOT_ID_BYTES32="0x$(printf '%s' "$LOT_ID" | tr -d '-')00000000000000000000000000000000"
+export LOT_ID_BYTES32
 
 forge script "script/CreateAuction.s.sol:CreateAuctionScript" \
   --rpc-url "$RPC_URL" \

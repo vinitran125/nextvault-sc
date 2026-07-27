@@ -23,7 +23,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,uint256 amount,bytes32 nonce,uint256 deadline)"
     );
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
-        "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 designAQuantity,uint256 designBQuantity,uint256 designCQuantity,uint16 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
+        "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint16 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
     );
 
     enum AuctionStatus {
@@ -59,9 +59,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 startingBid;
         uint256 previewDurationSeconds;
         uint256 auctionDurationSeconds;
-        uint256 designAQuantity;
-        uint256 designBQuantity;
-        uint256 designCQuantity;
+        uint256 variant1Quantity;
+        uint256 variant2Quantity;
+        uint256 variant3Quantity;
         uint16 nftPriceRatioBps;
         string nftName;
         string nftSymbol;
@@ -97,7 +97,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidStartingBid();
     error InvalidAuctionDuration();
     error InvalidNftConfig();
-    error InvalidRarityAllocation();
+    error InvalidVariantAllocation();
     error AuctionNotFound();
     error AuctionAlreadyCancelled();
     error AuctionAlreadyEnded();
@@ -179,11 +179,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 tokenId,
         uint256 blockTimestamp
     );
-    event NFTDesignUpdated(
+    event NFTVariantUpdated(
         bytes32 indexed lotId,
         address indexed nftCollection,
         uint256 indexed tokenId,
-        uint8 design,
+        uint8 variant,
         uint256 blockTimestamp
     );
     event ConsignmentDepositCreated(
@@ -291,8 +291,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (params.auctionDurationSeconds == 0) revert InvalidAuctionDuration();
         if (params.nftPriceRatioBps == 0) revert InvalidNftConfig();
 
-        uint256 nftMaxSupply = params.designAQuantity + params.designBQuantity + params.designCQuantity;
-        if (nftMaxSupply == 0) revert InvalidRarityAllocation();
+        uint256 nftMaxSupply = params.variant1Quantity + params.variant2Quantity + params.variant3Quantity;
+        if (nftMaxSupply == 0) revert InvalidVariantAllocation();
 
         uint256 nftPrice = (params.lowEstimate * params.nftPriceRatioBps) / BPS_DENOMINATOR / nftMaxSupply;
         if (nftPrice == 0) revert InvalidNftConfig();
@@ -306,9 +306,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 params.metadataUri,
                 params.lotId,
                 nftMaxSupply,
-                params.designAQuantity,
-                params.designBQuantity,
-                params.designCQuantity
+                params.variant1Quantity,
+                params.variant2Quantity,
+                params.variant3Quantity
             );
 
         auctions[params.lotId] = AuctionConfig({
@@ -380,7 +380,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 lastTokenId = LotNFT(auction.nftCollection).mintBatch(msg.sender, quantity);
         uint256 firstTokenId = lastTokenId - quantity + 1;
         INFTDesignManager(nftDesignManager)
-            .requestDesigns(lotId, msg.sender, auction.nftCollection, firstTokenId, quantity);
+            .requestVariants(lotId, msg.sender, auction.nftCollection, firstTokenId, quantity);
 
         emit NFTPurchased(lotId, msg.sender, quantity, totalPrice, lastTokenId, block.timestamp);
     }
@@ -550,7 +550,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         token.safeTransfer(auction.consignor, consignorProceeds);
         token.safeTransfer(treasury, platformRevenue);
 
-        INFTDesignManager(nftDesignManager).mintWinnerDesign(lotId, auction.nftCollection, winner);
+        INFTDesignManager(nftDesignManager).mintWinnerVariant(lotId, auction.nftCollection, winner);
 
         emit AuctionSettled(
             lotId,
@@ -609,11 +609,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit LotNFTTransferred(lotId, msg.sender, from, to, tokenId, block.timestamp);
     }
 
-    function onLotNFTDesignAssigned(bytes32 lotId, uint256 tokenId, uint8 design) external {
+    function onLotNFTVariantAssigned(bytes32 lotId, uint256 tokenId, uint8 variant) external {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (auctions[lotId].nftCollection != msg.sender) revert InvalidNftCollection();
 
-        emit NFTDesignUpdated(lotId, msg.sender, tokenId, design, block.timestamp);
+        emit NFTVariantUpdated(lotId, msg.sender, tokenId, variant, block.timestamp);
     }
 
     function depositConsignment(ConsignmentDepositAuthorization calldata authorization, bytes calldata signature)
@@ -718,9 +718,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 params.startingBid,
                 params.previewDurationSeconds,
                 params.auctionDurationSeconds,
-                params.designAQuantity,
-                params.designBQuantity,
-                params.designCQuantity,
+                params.variant1Quantity,
+                params.variant2Quantity,
+                params.variant3Quantity,
                 params.nftPriceRatioBps,
                 keccak256(bytes(params.nftName)),
                 keccak256(bytes(params.nftSymbol)),
