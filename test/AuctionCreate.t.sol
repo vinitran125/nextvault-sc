@@ -38,11 +38,11 @@ contract AuctionCreateTest is Test {
         string thumbnailUrl,
         uint256 blockTimestamp
     );
-    event NFTDesignUpdated(
+    event NFTVariantUpdated(
         bytes32 indexed lotId,
         address indexed nftCollection,
         uint256 indexed tokenId,
-        uint8 design,
+        uint8 variant,
         uint256 blockTimestamp
     );
 
@@ -104,9 +104,9 @@ contract AuctionCreateTest is Test {
         assertEq(nft.lotId(), LOT_ID);
         assertEq(nft.auction(), address(auction));
         assertEq(nft.maxSupply(), 100);
-        assertEq(nft.designAQuantity(), 50);
-        assertEq(nft.designBQuantity(), 30);
-        assertEq(nft.designCQuantity(), 20);
+        assertEq(nft.variant1Quantity(), 50);
+        assertEq(nft.variant2Quantity(), 30);
+        assertEq(nft.variant3Quantity(), 20);
         assertEq(nft.initialMintLimit(), 5);
         assertEq(config.nftCollection.code.length, 45);
         assertNotEq(config.nftCollection, address(lotNFTImplementation));
@@ -158,9 +158,10 @@ contract AuctionCreateTest is Test {
 
         LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
         assertEq(nft.balanceOf(buyer), 5);
-        assertEq(uint256(nft.designOf(1)), uint256(LotNFT.Design.Pending));
+        assertEq(nft.variantOf(1), 0);
+        assertEq(nft.tokenURI(1), "");
 
-        NFTDesignManager.DesignRequest memory request = designManager.getDesignRequest(1);
+        NFTDesignManager.VariantRequest memory request = designManager.getVariantRequest(1);
         assertEq(request.lotId, LOT_ID);
         assertEq(request.buyer, buyer);
         assertEq(request.firstTokenId, 1);
@@ -169,10 +170,37 @@ contract AuctionCreateTest is Test {
 
         vrf.fulfill(1, 123);
 
-        request = designManager.getDesignRequest(1);
+        request = designManager.getVariantRequest(1);
         assertTrue(request.fulfilled);
-        assertTrue(nft.designOf(1) != LotNFT.Design.Pending);
-        assertEq(nft.designARemaining() + nft.designBRemaining() + nft.designCRemaining(), 95);
+        assertTrue(nft.variantOf(1) != 0);
+        assertEq(nft.tokenURI(1), string.concat("ipfs://metadata/", vm.toString(nft.variantOf(1))));
+        assertEq(nft.variant1Remaining() + nft.variant2Remaining() + nft.variant3Remaining(), 95);
+    }
+
+    function testTokenUriUsesVariantNumberInsteadOfMintSequence() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.previewDurationSeconds = 0;
+        params.variant1Quantity = 0;
+        params.variant2Quantity = 1;
+        params.variant3Quantity = 0;
+        bytes32 nonce = _nonce("variant-uri");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        token.mint(buyer, config.nftPrice);
+        vm.startPrank(buyer);
+        token.approve(address(auction), config.nftPrice);
+        auction.buyNFT(LOT_ID, 1);
+        vm.stopPrank();
+
+        LotNFT nft = LotNFT(config.nftCollection);
+        assertEq(nft.tokenURI(1), "");
+
+        vrf.fulfill(1, 123);
+
+        assertEq(nft.variantOf(1), 2);
+        assertEq(nft.tokenURI(1), "ipfs://metadata/2");
     }
 
     function testVrfFulfillmentEmitsDesignUpdateFromAuction() external {
@@ -190,7 +218,7 @@ contract AuctionCreateTest is Test {
         vm.stopPrank();
 
         vm.expectEmit(true, true, true, true, address(auction));
-        emit NFTDesignUpdated(LOT_ID, config.nftCollection, 1, uint8(LotNFT.Design.A), block.timestamp);
+        emit NFTVariantUpdated(LOT_ID, config.nftCollection, 1, 1, block.timestamp);
         vrf.fulfill(1, 0);
     }
 
@@ -198,7 +226,7 @@ contract AuctionCreateTest is Test {
         _createDefaultAuction();
 
         vm.expectRevert(Auction.InvalidNftCollection.selector);
-        auction.onLotNFTDesignAssigned(LOT_ID, 1, uint8(LotNFT.Design.A));
+        auction.onLotNFTVariantAssigned(LOT_ID, 1, 1);
     }
 
     function testRawFulfillRandomWordsRejectsNonCoordinator() external {
@@ -212,9 +240,9 @@ contract AuctionCreateTest is Test {
     function testVrfAssignmentsExhaustConfiguredRarityPoolExactly() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         params.previewDurationSeconds = 0;
-        params.designAQuantity = 2;
-        params.designBQuantity = 2;
-        params.designCQuantity = 2;
+        params.variant1Quantity = 2;
+        params.variant2Quantity = 2;
+        params.variant3Quantity = 2;
         bytes32 nonce = _nonce("exhaust-rarity-pool");
         uint256 deadline = block.timestamp + 1 hours;
         auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
@@ -231,17 +259,17 @@ contract AuctionCreateTest is Test {
             vrf.fulfill(i + 1, 0);
         }
 
-        assertEq(nft.designARemaining(), 0);
-        assertEq(nft.designBRemaining(), 0);
-        assertEq(nft.designCRemaining(), 0);
+        assertEq(nft.variant1Remaining(), 0);
+        assertEq(nft.variant2Remaining(), 0);
+        assertEq(nft.variant3Remaining(), 0);
 
-        uint256[5] memory designCounts;
+        uint256[5] memory variantCounts;
         for (uint256 tokenId = 1; tokenId <= 6; tokenId++) {
-            designCounts[uint256(nft.designOf(tokenId))]++;
+            variantCounts[uint256(nft.variantOf(tokenId))]++;
         }
-        assertEq(designCounts[uint256(LotNFT.Design.A)], 2);
-        assertEq(designCounts[uint256(LotNFT.Design.B)], 2);
-        assertEq(designCounts[uint256(LotNFT.Design.C)], 2);
+        assertEq(variantCounts[1], 2);
+        assertEq(variantCounts[2], 2);
+        assertEq(variantCounts[3], 2);
     }
 
     function testOperatorCanUpdateAuctionDetailsDuringPreview() external {
@@ -431,18 +459,18 @@ contract AuctionCreateTest is Test {
 
     function testCreateAuctionRevertsWhenRarityAllocationIsZero() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
-        params.designAQuantity = 0;
-        params.designBQuantity = 0;
-        params.designCQuantity = 0;
+        params.variant1Quantity = 0;
+        params.variant2Quantity = 0;
+        params.variant3Quantity = 0;
 
-        _expectCreateRevert(params, "zero-supply", Auction.InvalidRarityAllocation.selector);
+        _expectCreateRevert(params, "zero-supply", Auction.InvalidVariantAllocation.selector);
     }
 
     function testCreateAuctionSupportsSmallSupplyMintLimitMinimumOne() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
-        params.designAQuantity = 1;
-        params.designBQuantity = 0;
-        params.designCQuantity = 0;
+        params.variant1Quantity = 1;
+        params.variant2Quantity = 0;
+        params.variant3Quantity = 0;
         bytes32 nonce = _nonce("small-supply");
         uint256 deadline = block.timestamp + 1 hours;
 
@@ -479,9 +507,9 @@ contract AuctionCreateTest is Test {
             startingBid: STARTING_BID,
             previewDurationSeconds: 1 days,
             auctionDurationSeconds: 7 days,
-            designAQuantity: 50,
-            designBQuantity: 30,
-            designCQuantity: 20,
+            variant1Quantity: 50,
+            variant2Quantity: 30,
+            variant3Quantity: 20,
             nftPriceRatioBps: 1_000,
             nftName: "NextVault Lot 1",
             nftSymbol: "NVL1",
@@ -509,9 +537,9 @@ contract AuctionCreateTest is Test {
                 params.startingBid,
                 params.previewDurationSeconds,
                 params.auctionDurationSeconds,
-                params.designAQuantity,
-                params.designBQuantity,
-                params.designCQuantity,
+                params.variant1Quantity,
+                params.variant2Quantity,
+                params.variant3Quantity,
                 params.nftPriceRatioBps,
                 keccak256(bytes(params.nftName)),
                 keccak256(bytes(params.nftSymbol)),

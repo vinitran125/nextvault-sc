@@ -8,14 +8,18 @@ interface INFTDesignManager {
         string calldata baseTokenURI,
         bytes32 lotId,
         uint256 maxSupply,
-        uint256 designAQuantity,
-        uint256 designBQuantity,
-        uint256 designCQuantity
+        uint256 variant1Quantity,
+        uint256 variant2Quantity,
+        uint256 variant3Quantity
     ) external returns (address nftCollection);
 
-    function requestDesigns(bytes32 lotId, address buyer, address nftCollection, uint256 firstTokenId, uint256 quantity)
-        external
-        returns (uint256 requestId);
+    function requestVariants(
+        bytes32 lotId,
+        address buyer,
+        address nftCollection,
+        uint256 firstTokenId,
+        uint256 quantity
+    ) external returns (uint256 requestId);
 
-    function mintWinnerDesign(bytes32 lotId, address nftCollection, address winner) external returns (uint256 tokenId);
+    function mintWinnerVariant(bytes32 lotId, address nftCollection, address winner) external returns (uint256 tokenId);
 }

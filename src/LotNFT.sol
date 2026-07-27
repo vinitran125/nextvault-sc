@@ -7,43 +7,40 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 interface IAuctionLotNFTHook {
     function onLotNFTTransfer(bytes32 lotId, address from, address to, uint256 tokenId) external;
-    function onLotNFTDesignAssigned(bytes32 lotId, uint256 tokenId, uint8 design) external;
+    function onLotNFTVariantAssigned(bytes32 lotId, uint256 tokenId, uint8 variant) external;
 }
 
 contract LotNFT is Initializable, ERC721Upgradeable {
-    enum Design {
-        Pending,
-        A,
-        B,
-        C,
-        D
-    }
+    uint8 public constant VARIANT_1 = 1;
+    uint8 public constant VARIANT_2 = 2;
+    uint8 public constant VARIANT_3 = 3;
+    uint8 public constant VARIANT_4 = 4;
 
     error OnlyAuction();
     error MaxSupplyReached();
     error MintLimitExceeded();
-    error InvalidRarityAllocation();
-    error DesignAlreadyAssigned();
-    error WinnerDesignAlreadyMinted();
+    error InvalidVariantAllocation();
+    error VariantAlreadyAssigned();
+    error WinnerVariantAlreadyMinted();
 
     address public auction;
     address public designManager;
     bytes32 public lotId;
     uint256 public maxSupply;
-    uint256 public designAQuantity;
-    uint256 public designBQuantity;
-    uint256 public designCQuantity;
+    uint256 public variant1Quantity;
+    uint256 public variant2Quantity;
+    uint256 public variant3Quantity;
     string private baseTokenURI;
     uint256 private nextTokenId;
-    uint256 public designARemaining;
-    uint256 public designBRemaining;
-    uint256 public designCRemaining;
-    bool public winnerDesignMinted;
+    uint256 public variant1Remaining;
+    uint256 public variant2Remaining;
+    uint256 public variant3Remaining;
+    bool public winnerVariantMinted;
 
     mapping(address => uint256) public mintedByWallet;
-    mapping(uint256 => Design) public designOf;
+    mapping(uint256 => uint8) public variantOf;
 
-    event DesignAssigned(uint256 indexed tokenId, Design design);
+    event VariantAssigned(uint256 indexed tokenId, uint8 variant);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -56,25 +53,25 @@ contract LotNFT is Initializable, ERC721Upgradeable {
     /// @param baseTokenURI_ Base URI used to build each tokenURI.
     /// @param lotId_ Auction lot ID that owns this collection.
     /// @param maxSupply_ Maximum NFTs that can ever be minted for this lot.
-    /// @param designAQuantity_ Number of Design A NFTs allocated for this lot.
-    /// @param designBQuantity_ Number of Design B NFTs allocated for this lot.
-    /// @param designCQuantity_ Number of Design C NFTs allocated for this lot.
+    /// @param variant1Quantity_ Number of variant 1 NFTs allocated for this lot.
+    /// @param variant2Quantity_ Number of variant 2 NFTs allocated for this lot.
+    /// @param variant3Quantity_ Number of variant 3 NFTs allocated for this lot.
     /// @param auction_ Auction contract allowed to mint NFTs.
-    /// @param designManager_ Contract allowed to assign random designs and mint Design D.
+    /// @param designManager_ Contract allowed to assign random variants and mint variant 4.
     function initialize(
         string calldata name_,
         string calldata symbol_,
         string calldata baseTokenURI_,
         bytes32 lotId_,
         uint256 maxSupply_,
-        uint256 designAQuantity_,
-        uint256 designBQuantity_,
-        uint256 designCQuantity_,
+        uint256 variant1Quantity_,
+        uint256 variant2Quantity_,
+        uint256 variant3Quantity_,
         address auction_,
         address designManager_
     ) external initializer {
-        if (designAQuantity_ + designBQuantity_ + designCQuantity_ != maxSupply_) {
-            revert InvalidRarityAllocation();
+        if (variant1Quantity_ + variant2Quantity_ + variant3Quantity_ != maxSupply_) {
+            revert InvalidVariantAllocation();
         }
 
         __ERC721_init(name_, symbol_);
@@ -83,12 +80,12 @@ contract LotNFT is Initializable, ERC721Upgradeable {
         lotId = lotId_;
         baseTokenURI = baseTokenURI_;
         maxSupply = maxSupply_;
-        designAQuantity = designAQuantity_;
-        designBQuantity = designBQuantity_;
-        designCQuantity = designCQuantity_;
-        designARemaining = designAQuantity_;
-        designBRemaining = designBQuantity_;
-        designCRemaining = designCQuantity_;
+        variant1Quantity = variant1Quantity_;
+        variant2Quantity = variant2Quantity_;
+        variant3Quantity = variant3Quantity_;
+        variant1Remaining = variant1Quantity_;
+        variant2Remaining = variant2Quantity_;
+        variant3Remaining = variant3Quantity_;
         nextTokenId = 1;
     }
 
@@ -112,45 +109,45 @@ contract LotNFT is Initializable, ERC721Upgradeable {
         }
     }
 
-    /// @notice Assigns an A, B, or C design to a previously minted pending NFT.
+    /// @notice Assigns variant 1, 2, or 3 to a previously minted pending NFT.
     /// @dev Draws from the remaining rarity pool, so every assignment consumes exactly one configured slot.
-    function assignRandomDesign(uint256 tokenId, uint256 randomWord) external returns (Design design) {
+    function assignRandomVariant(uint256 tokenId, uint256 randomWord) external returns (uint8 variant) {
         if (msg.sender != designManager) revert OnlyAuction();
         _requireOwned(tokenId);
-        if (designOf[tokenId] != Design.Pending) revert DesignAlreadyAssigned();
+        if (variantOf[tokenId] != 0) revert VariantAlreadyAssigned();
 
-        uint256 remaining = designARemaining + designBRemaining + designCRemaining;
+        uint256 remaining = variant1Remaining + variant2Remaining + variant3Remaining;
         uint256 draw = randomWord % remaining;
 
-        if (draw < designARemaining) {
-            design = Design.A;
-            designARemaining--;
-        } else if (draw < designARemaining + designBRemaining) {
-            design = Design.B;
-            designBRemaining--;
+        if (draw < variant1Remaining) {
+            variant = VARIANT_1;
+            variant1Remaining--;
+        } else if (draw < variant1Remaining + variant2Remaining) {
+            variant = VARIANT_2;
+            variant2Remaining--;
         } else {
-            design = Design.C;
-            designCRemaining--;
+            variant = VARIANT_3;
+            variant3Remaining--;
         }
 
-        designOf[tokenId] = design;
-        emit DesignAssigned(tokenId, design);
-        IAuctionLotNFTHook(auction).onLotNFTDesignAssigned(lotId, tokenId, uint8(design));
+        variantOf[tokenId] = variant;
+        emit VariantAssigned(tokenId, variant);
+        IAuctionLotNFTHook(auction).onLotNFTVariantAssigned(lotId, tokenId, variant);
     }
 
-    /// @notice Mints the one-of-one Design D NFT to the settled auction winner.
-    /// @dev Design D is outside maxSupply and can only be minted once.
-    function mintWinnerDesign(address winner) external returns (uint256 tokenId) {
+    /// @notice Mints the one-of-one variant 4 NFT to the settled auction winner.
+    /// @dev Variant 4 is outside maxSupply and can only be minted once.
+    function mintWinnerVariant(address winner) external returns (uint256 tokenId) {
         if (msg.sender != designManager) revert OnlyAuction();
-        if (winnerDesignMinted) revert WinnerDesignAlreadyMinted();
+        if (winnerVariantMinted) revert WinnerVariantAlreadyMinted();
 
-        winnerDesignMinted = true;
+        winnerVariantMinted = true;
         tokenId = maxSupply + 1;
-        designOf[tokenId] = Design.D;
+        variantOf[tokenId] = VARIANT_4;
         _mint(winner, tokenId);
 
-        emit DesignAssigned(tokenId, Design.D);
-        IAuctionLotNFTHook(auction).onLotNFTDesignAssigned(lotId, tokenId, uint8(Design.D));
+        emit VariantAssigned(tokenId, VARIANT_4);
+        IAuctionLotNFTHook(auction).onLotNFTVariantAssigned(lotId, tokenId, VARIANT_4);
     }
 
     /// @notice Returns the maximum number of NFTs one wallet can mint during initial sale.
@@ -181,11 +178,12 @@ contract LotNFT is Initializable, ERC721Upgradeable {
     }
 
     /// @notice Returns the metadata URI for a token.
-    /// @dev The URI is built as baseTokenURI + tokenId.
+    /// @dev Returns an empty URI while VRF assignment is pending, then builds baseTokenURI + variant number.
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);
-        if (bytes(baseTokenURI).length == 0) return "";
-        return string.concat(baseTokenURI, Strings.toString(tokenId));
+        uint8 variant = variantOf[tokenId];
+        if (bytes(baseTokenURI).length == 0 || variant == 0) return "";
+        return string.concat(baseTokenURI, Strings.toString(variant));
     }
 
     function _update(address to, uint256 tokenId, address auth) internal override returns (address from) {
