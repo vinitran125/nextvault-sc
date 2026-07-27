@@ -5,10 +5,15 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {Test} from "forge-std/Test.sol";
 import {Auction} from "../src/Auction.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
+import {LotNFT} from "../src/LotNFT.sol";
+import {NFTDesignManager} from "../src/NFTDesignManager.sol";
+import {MockVRFCoordinator} from "./mocks/MockVRFCoordinator.sol";
 
 contract AuctionPlaceBidTest is Test {
     Auction private auction;
     FakeUSDC private token;
+    MockVRFCoordinator private vrf;
+    NFTDesignManager private designManager;
 
     uint256 private adminKey = 0xA11CE;
     address private admin = vm.addr(adminKey);
@@ -30,14 +35,23 @@ contract AuctionPlaceBidTest is Test {
     event BidPlaced(
         bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
     );
+    event AuctionExtended(bytes32 indexed lotId, uint256 newEndTime);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
 
     function setUp() external {
         token = new FakeUSDC();
+        vrf = new MockVRFCoordinator();
+        LotNFT lotNFTImplementation = new LotNFT();
+        designManager = new NFTDesignManager(
+            admin, address(lotNFTImplementation), address(vrf), 1, bytes32(uint256(1)), 500_000, 3, false
+        );
         Auction implementation = new Auction();
-        bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin));
+        bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin, address(designManager)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
         auction = Auction(address(proxy));
+
+        vm.prank(admin);
+        designManager.initializeAuction(address(auction));
 
         bytes32 operatorRole = auction.OPERATOR_ROLE();
         vm.prank(admin);
@@ -61,6 +75,40 @@ contract AuctionPlaceBidTest is Test {
 
         assertEq(token.balanceOf(address(auction)), NFT_PRICE + STARTING_BID / 10);
         assertEq(token.balanceOf(bidderA), STARTING_BALANCE - NFT_PRICE - STARTING_BID / 10);
+    }
+
+    function testPlaceBidExtendsAuctionWhenBidIsInsideAntiSnipeWindow() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        uint256 previousEndTime = auction.getAuction(LOT_ID).endTime;
+        vm.warp(previousEndTime - 4 minutes);
+        uint256 newEndTime = block.timestamp + 5 minutes;
+
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit AuctionExtended(LOT_ID, newEndTime);
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, block.timestamp);
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, STARTING_BID);
+
+        assertEq(auction.getAuction(LOT_ID).endTime, newEndTime);
+    }
+
+    function testPlaceBidDoesNotExtendAuctionOutsideAntiSnipeWindow() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        uint256 previousEndTime = auction.getAuction(LOT_ID).endTime;
+        vm.warp(previousEndTime - 6 minutes);
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, STARTING_BID);
+
+        assertEq(auction.getAuction(LOT_ID).endTime, previousEndTime);
     }
 
     function testPlaceBidRefundsPreviousManualBidder() external {

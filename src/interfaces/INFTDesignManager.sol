@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.13;
+
+interface INFTDesignManager {
+    function createLotNFT(
+        string calldata name,
+        string calldata symbol,
+        string calldata baseTokenURI,
+        bytes32 lotId,
+        uint256 maxSupply,
+        uint256 designAQuantity,
+        uint256 designBQuantity,
+        uint256 designCQuantity
+    ) external returns (address nftCollection);
+
+    function requestDesigns(bytes32 lotId, address buyer, address nftCollection, uint256 firstTokenId, uint256 quantity)
+        external
+        returns (uint256 requestId);
+
+    function mintWinnerDesign(bytes32 lotId, address nftCollection, address winner) external returns (uint256 tokenId);
+}

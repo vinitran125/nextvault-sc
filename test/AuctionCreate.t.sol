@@ -6,16 +6,22 @@ import {Test} from "forge-std/Test.sol";
 import {Auction} from "../src/Auction.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
 import {LotNFT} from "../src/LotNFT.sol";
+import {NFTDesignManager} from "../src/NFTDesignManager.sol";
+import {MockVRFCoordinator} from "./mocks/MockVRFCoordinator.sol";
 
 contract AuctionCreateTest is Test {
     Auction private auction;
     FakeUSDC private token;
+    MockVRFCoordinator private vrf;
+    NFTDesignManager private designManager;
+    LotNFT private lotNFTImplementation;
 
     uint256 private adminKey = 0xA11CE;
     uint256 private nonAdminKey = 0xB0B;
     address private admin = vm.addr(adminKey);
     address private operator = makeAddr("operator");
     address private consignor = makeAddr("consignor");
+    address private buyer = makeAddr("buyer");
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
     uint256 private constant USDC = 1e6;
@@ -32,13 +38,28 @@ contract AuctionCreateTest is Test {
         string thumbnailUrl,
         uint256 blockTimestamp
     );
+    event NFTDesignUpdated(
+        bytes32 indexed lotId,
+        address indexed nftCollection,
+        uint256 indexed tokenId,
+        uint8 design,
+        uint256 blockTimestamp
+    );
 
     function setUp() external {
         token = new FakeUSDC();
+        vrf = new MockVRFCoordinator();
+        lotNFTImplementation = new LotNFT();
+        designManager = new NFTDesignManager(
+            admin, address(lotNFTImplementation), address(vrf), 1, bytes32(uint256(1)), 500_000, 3, false
+        );
         Auction implementation = new Auction();
-        bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin));
+        bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin, address(designManager)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
         auction = Auction(address(proxy));
+
+        vm.prank(admin);
+        designManager.initializeAuction(address(auction));
 
         bytes32 operatorRole = auction.OPERATOR_ROLE();
         vm.prank(admin);
@@ -87,6 +108,24 @@ contract AuctionCreateTest is Test {
         assertEq(nft.designBQuantity(), 30);
         assertEq(nft.designCQuantity(), 20);
         assertEq(nft.initialMintLimit(), 5);
+        assertEq(config.nftCollection.code.length, 45);
+        assertNotEq(config.nftCollection, address(lotNFTImplementation));
+        assertEq(designManager.lotNFTImplementation(), address(lotNFTImplementation));
+    }
+
+    function testDesignManagerIsFixedDuringInitialization() external {
+        assertEq(auction.nftDesignManager(), address(designManager));
+
+        vm.prank(admin);
+        vm.expectRevert(NFTDesignManager.AlreadyInitialized.selector);
+        designManager.initializeAuction(makeAddr("another-auction"));
+    }
+
+    function testLotNftImplementationCannotBeInitialized() external {
+        vm.expectRevert(bytes4(keccak256("InvalidInitialization()")));
+        lotNFTImplementation.initialize(
+            "Implementation", "IMPL", "", LOT_ID, 1, 1, 0, 0, address(auction), address(designManager)
+        );
     }
 
     function testCreateAuctionWithZeroPreviewStartsImmediately() external {
@@ -102,6 +141,107 @@ contract AuctionCreateTest is Test {
         assertEq(config.startTime, block.timestamp);
         assertEq(config.endTime, block.timestamp + 7 days);
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Active));
+    }
+
+    function testBuyNftMintsPendingThenVrfAssignsDesignsFromRemainingPool() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.previewDurationSeconds = 0;
+        bytes32 nonce = _nonce("vrf-reveal");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        token.mint(buyer, 50 * USDC);
+        vm.startPrank(buyer);
+        token.approve(address(auction), 50 * USDC);
+        auction.buyNFT(LOT_ID, 5);
+        vm.stopPrank();
+
+        LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
+        assertEq(nft.balanceOf(buyer), 5);
+        assertEq(uint256(nft.designOf(1)), uint256(LotNFT.Design.Pending));
+
+        NFTDesignManager.DesignRequest memory request = designManager.getDesignRequest(1);
+        assertEq(request.lotId, LOT_ID);
+        assertEq(request.buyer, buyer);
+        assertEq(request.firstTokenId, 1);
+        assertEq(request.quantity, 5);
+        assertFalse(request.fulfilled);
+
+        vrf.fulfill(1, 123);
+
+        request = designManager.getDesignRequest(1);
+        assertTrue(request.fulfilled);
+        assertTrue(nft.designOf(1) != LotNFT.Design.Pending);
+        assertEq(nft.designARemaining() + nft.designBRemaining() + nft.designCRemaining(), 95);
+    }
+
+    function testVrfFulfillmentEmitsDesignUpdateFromAuction() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.previewDurationSeconds = 0;
+        bytes32 nonce = _nonce("vrf-auction-event");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        token.mint(buyer, config.nftPrice);
+        vm.startPrank(buyer);
+        token.approve(address(auction), config.nftPrice);
+        auction.buyNFT(LOT_ID, 1);
+        vm.stopPrank();
+
+        vm.expectEmit(true, true, true, true, address(auction));
+        emit NFTDesignUpdated(LOT_ID, config.nftCollection, 1, uint8(LotNFT.Design.A), block.timestamp);
+        vrf.fulfill(1, 0);
+    }
+
+    function testDesignUpdateCallbackRejectsCallerThatIsNotLotCollection() external {
+        _createDefaultAuction();
+
+        vm.expectRevert(Auction.InvalidNftCollection.selector);
+        auction.onLotNFTDesignAssigned(LOT_ID, 1, uint8(LotNFT.Design.A));
+    }
+
+    function testRawFulfillRandomWordsRejectsNonCoordinator() external {
+        uint256[] memory randomWords = new uint256[](1);
+        randomWords[0] = 1;
+
+        vm.expectRevert(NFTDesignManager.OnlyVRFCoordinator.selector);
+        designManager.rawFulfillRandomWords(1, randomWords);
+    }
+
+    function testVrfAssignmentsExhaustConfiguredRarityPoolExactly() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.previewDurationSeconds = 0;
+        params.designAQuantity = 2;
+        params.designBQuantity = 2;
+        params.designCQuantity = 2;
+        bytes32 nonce = _nonce("exhaust-rarity-pool");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        LotNFT nft = LotNFT(config.nftCollection);
+        for (uint256 i = 0; i < 6; i++) {
+            address currentBuyer = address(uint160(100 + i));
+            token.mint(currentBuyer, config.nftPrice);
+            vm.startPrank(currentBuyer);
+            token.approve(address(auction), config.nftPrice);
+            auction.buyNFT(LOT_ID, 1);
+            vm.stopPrank();
+            vrf.fulfill(i + 1, 0);
+        }
+
+        assertEq(nft.designARemaining(), 0);
+        assertEq(nft.designBRemaining(), 0);
+        assertEq(nft.designCRemaining(), 0);
+
+        uint256[5] memory designCounts;
+        for (uint256 tokenId = 1; tokenId <= 6; tokenId++) {
+            designCounts[uint256(nft.designOf(tokenId))]++;
+        }
+        assertEq(designCounts[uint256(LotNFT.Design.A)], 2);
+        assertEq(designCounts[uint256(LotNFT.Design.B)], 2);
+        assertEq(designCounts[uint256(LotNFT.Design.C)], 2);
     }
 
     function testOperatorCanUpdateAuctionDetailsDuringPreview() external {

@@ -10,6 +10,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {LotNFT} from "./LotNFT.sol";
+import {INFTDesignManager} from "./interfaces/INFTDesignManager.sol";
 
 contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
@@ -121,6 +122,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
     error AuctionDetailsLocked();
+    error InvalidDesignManager();
 
     event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
@@ -163,6 +165,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     event BidPlaced(
         bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
     );
+    event AuctionExtended(bytes32 indexed lotId, uint256 newEndTime);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event MaxBidSet(
         bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 depositAmount, uint256 blockTimestamp
@@ -174,6 +177,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         address indexed from,
         address to,
         uint256 tokenId,
+        uint256 blockTimestamp
+    );
+    event NFTDesignUpdated(
+        bytes32 indexed lotId,
+        address indexed nftCollection,
+        uint256 indexed tokenId,
+        uint8 design,
         uint256 blockTimestamp
     );
     event ConsignmentDepositCreated(
@@ -213,15 +223,19 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     mapping(bytes32 => uint256) private itemToMaxBid;
     mapping(bytes32 => address) private itemToMaxBidder;
 
+    address public nftDesignManager;
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
-    function initialize(IERC20 token_, address admin) external initializer {
+    function initialize(IERC20 token_, address admin, address designManager) external initializer {
         if (address(token_) == address(0)) revert InvalidToken();
         if (admin == address(0)) revert InvalidConfig();
+        if (designManager == address(0)) revert InvalidDesignManager();
         token = token_;
+        nftDesignManager = designManager;
         tokenDecimal = 10 ** IERC20Metadata(address(token_)).decimals();
 
         __AccessControl_init();
@@ -285,22 +299,22 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         uint256 startTime = block.timestamp + params.previewDurationSeconds;
         uint256 endTime = startTime + params.auctionDurationSeconds;
-        LotNFT nft = new LotNFT(
-            params.nftName,
-            params.nftSymbol,
-            params.metadataUri,
-            params.lotId,
-            nftMaxSupply,
-            params.designAQuantity,
-            params.designBQuantity,
-            params.designCQuantity,
-            address(this)
-        );
+        address nftCollection = INFTDesignManager(nftDesignManager)
+            .createLotNFT(
+                params.nftName,
+                params.nftSymbol,
+                params.metadataUri,
+                params.lotId,
+                nftMaxSupply,
+                params.designAQuantity,
+                params.designBQuantity,
+                params.designCQuantity
+            );
 
         auctions[params.lotId] = AuctionConfig({
             lotId: params.lotId,
             consignor: params.consignor,
-            nftCollection: address(nft),
+            nftCollection: nftCollection,
             lowEstimate: params.lowEstimate,
             highEstimate: params.highEstimate,
             startingBid: params.startingBid,
@@ -350,7 +364,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     function buyNFT(bytes32 lotId, uint256 quantity) external {
         if (!auctionExists[lotId]) revert AuctionNotFound();
-        AuctionConfig memory auction = auctions[lotId];
+        AuctionConfig storage auction = auctions[lotId];
 
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
@@ -364,6 +378,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         token.safeTransferFrom(msg.sender, address(this), totalPrice);
 
         uint256 lastTokenId = LotNFT(auction.nftCollection).mintBatch(msg.sender, quantity);
+        uint256 firstTokenId = lastTokenId - quantity + 1;
+        INFTDesignManager(nftDesignManager)
+            .requestDesigns(lotId, msg.sender, auction.nftCollection, firstTokenId, quantity);
 
         emit NFTPurchased(lotId, msg.sender, quantity, totalPrice, lastTokenId, block.timestamp);
     }
@@ -371,7 +388,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     function placeBid(bytes32 lotId, uint256 amount) external {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
-        AuctionConfig memory auction = auctions[lotId];
+        AuctionConfig storage auction = auctions[lotId];
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
         {
             revert AuctionNotActive();
@@ -390,13 +407,14 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         itemToCurrentBid[lotId] = amount;
         itemToAutoBid[lotId] = false;
 
+        _extendAuctionIfNeeded(lotId);
         emit BidPlaced(lotId, msg.sender, currentBid, amount, block.timestamp);
     }
 
     function placeBidFor(bytes32 lotId, address bidder, uint256 amount) external onlyRole(OPERATOR_ROLE) {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
-        AuctionConfig memory auction = auctions[lotId];
+        AuctionConfig storage auction = auctions[lotId];
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
         {
             revert AuctionNotActive();
@@ -414,6 +432,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         itemToAutoBid[lotId] = true;
 
         uint256 previousBid = currentBid == 0 ? auction.startingBid : currentBid;
+        _extendAuctionIfNeeded(lotId);
         emit BidPlaced(lotId, bidder, previousBid, amount, block.timestamp);
     }
 
@@ -531,6 +550,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         token.safeTransfer(auction.consignor, consignorProceeds);
         token.safeTransfer(treasury, platformRevenue);
 
+        INFTDesignManager(nftDesignManager).mintWinnerDesign(lotId, auction.nftCollection, winner);
+
         emit AuctionSettled(
             lotId,
             winner,
@@ -560,21 +581,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
-    //
-    //    function winnerPaymentDue(bytes32 lotId)
-    //        external
-    //        view
-    //        returns (uint256 hammerPrice, uint256 buyerPremium, uint256 depositHeld, uint256 remainingPayment)
-    //    {
-    //        if (!auctionExists[lotId]) revert AuctionNotFound();
-    //
-    //        address winner = currentBidderItem[lotId];
-    //        hammerPrice = currentBidItem[lotId];
-    //        buyerPremium = (hammerPrice * buyerPremiumBps) / BPS_DENOMINATOR;
-    //        depositHeld = bidderStates[lotId][winner].deposit;
-    //        uint256 totalPayment = hammerPrice + buyerPremium;
-    //        remainingPayment = totalPayment > depositHeld ? totalPayment - depositHeld : 0;
-    //    }
 
     function withdrawAuction(bytes32 lotId) external onlyRole(OPERATOR_ROLE) {
         if (!auctionExists[lotId]) revert AuctionNotFound();
@@ -601,6 +607,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (auctions[lotId].nftCollection != msg.sender) revert InvalidNftCollection();
 
         emit LotNFTTransferred(lotId, msg.sender, from, to, tokenId, block.timestamp);
+    }
+
+    function onLotNFTDesignAssigned(bytes32 lotId, uint256 tokenId, uint8 design) external {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (auctions[lotId].nftCollection != msg.sender) revert InvalidNftCollection();
+
+        emit NFTDesignUpdated(lotId, msg.sender, tokenId, design, block.timestamp);
     }
 
     function depositConsignment(ConsignmentDepositAuthorization calldata authorization, bytes calldata signature)
@@ -787,5 +800,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (validBid != amount) revert InvalidBidAmount();
 
         return currentBid;
+    }
+
+    function _extendAuctionIfNeeded(bytes32 lotId) internal {
+        if (block.timestamp + 5 minutes < auctions[lotId].endTime) return;
+
+        uint256 newEndTime = block.timestamp + 5 minutes;
+        auctions[lotId].endTime = newEndTime;
+        emit AuctionExtended(lotId, newEndTime);
     }
 }
