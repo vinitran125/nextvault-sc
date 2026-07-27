@@ -5,10 +5,15 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {Test} from "forge-std/Test.sol";
 import {Auction} from "../src/Auction.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
+import {LotNFT} from "../src/LotNFT.sol";
+import {NFTDesignManager} from "../src/NFTDesignManager.sol";
+import {MockVRFCoordinator} from "./mocks/MockVRFCoordinator.sol";
 
 contract AuctionEndWithdrawTest is Test {
     Auction private auction;
     FakeUSDC private token;
+    MockVRFCoordinator private vrf;
+    NFTDesignManager private designManager;
 
     uint256 private adminKey = 0xA11CE;
     address private admin = vm.addr(adminKey);
@@ -37,9 +42,17 @@ contract AuctionEndWithdrawTest is Test {
 
     function setUp() external {
         token = new FakeUSDC();
+        vrf = new MockVRFCoordinator();
+        LotNFT lotNFTImplementation = new LotNFT();
+        designManager = new NFTDesignManager(
+            admin, address(lotNFTImplementation), address(vrf), 1, bytes32(uint256(1)), 500_000, 3, false
+        );
         Auction implementation = new Auction();
-        bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin));
+        bytes memory initData = abi.encodeCall(Auction.initialize, (token, admin, address(designManager)));
         auction = Auction(address(new ERC1967Proxy(address(implementation), initData)));
+
+        vm.prank(admin);
+        designManager.initializeAuction(address(auction));
 
         bytes32 operatorRole = auction.OPERATOR_ROLE();
         vm.prank(admin);
