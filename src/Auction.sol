@@ -124,7 +124,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error AuctionDetailsLocked();
     error InvalidDesignManager();
 
-    event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
+    event AuctionCreated(bytes32 indexed lotId, address indexed nftCollection, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
         bytes32 indexed lotId,
         address indexed consignor,
@@ -329,7 +329,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         });
         auctionExists[params.lotId] = true;
 
-        emit AuctionCreated(params.lotId, block.timestamp);
+        emit AuctionCreated(params.lotId, nftCollection, block.timestamp);
 
         return params.lotId;
     }

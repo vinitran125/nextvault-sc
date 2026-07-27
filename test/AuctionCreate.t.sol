@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {Auction} from "../src/Auction.sol";
 import {FakeUSDC} from "../src/FakeUSDC.sol";
 import {LotNFT} from "../src/LotNFT.sol";
@@ -29,7 +30,6 @@ contract AuctionCreateTest is Test {
     uint256 private constant HIGH_ESTIMATE = 20_000 * USDC;
     uint256 private constant STARTING_BID = 10_000 * USDC;
 
-    event AuctionCreated(bytes32 indexed lotId, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
         bytes32 indexed lotId,
         address indexed consignor,
@@ -72,11 +72,10 @@ contract AuctionCreateTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory signature = _sign(params, nonce, deadline, adminKey);
 
-        vm.expectEmit(true, false, false, true, address(auction));
-        emit AuctionCreated(LOT_ID, block.timestamp);
-
+        vm.recordLogs();
         vm.prank(operator);
         bytes32 createdLotId = auction.createAuction(params, nonce, deadline, signature);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(createdLotId, LOT_ID);
         assertTrue(auction.auctionExists(LOT_ID));
@@ -97,6 +96,19 @@ contract AuctionCreateTest is Test {
         assertEq(config.nftPrice, 10 * USDC);
         assertEq(config.thumbnailUrl, "ipfs://thumbnail");
         assertTrue(config.nftCollection != address(0));
+
+        bytes32 eventSignature = keccak256("AuctionCreated(bytes32,address,uint256)");
+        bool eventFound;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(auction) || logs[i].topics[0] != eventSignature) continue;
+
+            assertEq(logs[i].topics[1], LOT_ID);
+            assertEq(address(uint160(uint256(logs[i].topics[2]))), config.nftCollection);
+            assertEq(abi.decode(logs[i].data, (uint256)), block.timestamp);
+            eventFound = true;
+            break;
+        }
+        assertTrue(eventFound);
 
         LotNFT nft = LotNFT(config.nftCollection);
         assertEq(nft.name(), "NextVault Lot 1");
