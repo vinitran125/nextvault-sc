@@ -111,8 +111,8 @@ contract AuctionCreateTest is Test {
         assertTrue(eventFound);
 
         LotNFT nft = LotNFT(config.nftCollection);
-        assertEq(nft.name(), "NextVault Lot 1");
-        assertEq(nft.symbol(), "NVL1");
+        assertEq(nft.name(), "NextVault Auctions");
+        assertEq(nft.symbol(), "NV");
         assertEq(nft.lotId(), LOT_ID);
         assertEq(nft.auction(), address(auction));
         assertEq(nft.maxSupply(), 100);
