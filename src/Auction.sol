@@ -19,6 +19,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant DEFAULT_BUYER_PREMIUM_BPS = 1_000;
     uint16 public constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
+    string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
+    string internal constant NFT_COLLECTION_SYMBOL = "NV";
     bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
         "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,uint256 amount,bytes32 nonce,uint256 deadline)"
     );
@@ -301,8 +303,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 endTime = startTime + params.auctionDurationSeconds;
         address nftCollection = INFTDesignManager(nftDesignManager)
             .createLotNFT(
-                params.nftName,
-                params.nftSymbol,
+                NFT_COLLECTION_NAME,
+                NFT_COLLECTION_SYMBOL,
                 params.metadataUri,
                 params.lotId,
                 nftMaxSupply,
