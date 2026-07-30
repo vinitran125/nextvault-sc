@@ -22,7 +22,7 @@ contract CreateAuctionScript is Script {
             variant1Quantity: vm.envUint("VARIANT_1_QUANTITY"),
             variant2Quantity: vm.envUint("VARIANT_2_QUANTITY"),
             variant3Quantity: vm.envUint("VARIANT_3_QUANTITY"),
-            nftPriceRatioBps: uint16(vm.envUint("NFT_PRICE_RATIO_BPS")),
+            nftPriceRatioBps: vm.envUint("NFT_PRICE_RATIO_BPS"),
             nftName: vm.envString("NFT_NAME"),
             nftSymbol: vm.envString("NFT_SYMBOL"),
             thumbnailUrl: vm.envString("THUMBNAIL_URL"),
