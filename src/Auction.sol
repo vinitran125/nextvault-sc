@@ -272,6 +272,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function setWalletBlacklist(address wallet, bool blacklisted) external onlyRole(OPERATOR_ROLE) {
+        _setWalletBlacklist(wallet, blacklisted);
+    }
+
+    function _setWalletBlacklist(address wallet, bool blacklisted) internal {
         if (wallet == address(0)) revert InvalidConfig();
 
         blacklistedWallets[wallet] = blacklisted;
@@ -594,6 +598,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 winningBid = itemToCurrentBid[lotId];
         paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
+
+        if (!paymentCollected && hasRole(OPERATOR_ROLE, msg.sender) && !blacklistedWallets[winner]) {
+            _setWalletBlacklist(winner, true);
+        }
 
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }

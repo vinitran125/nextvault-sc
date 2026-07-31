@@ -39,6 +39,7 @@ contract AuctionEndWithdrawTest is Test {
     event AuctionWithdrawn(bytes32 indexed lotId, address indexed highestBidder, uint256 blockTimestamp);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event MaxBidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
+    event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
 
     function setUp() external {
         token = new FakeUSDC();
@@ -200,7 +201,45 @@ contract AuctionEndWithdrawTest is Test {
 
         assertTrue(paymentCollected);
         assertTrue(auction.auctionPaymentCollected(LOT_ID));
+        assertFalse(auction.blacklistedWallets(bidderA));
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Finalized));
+    }
+
+    function testOperatorPaymentRetryFailureBlacklistsWinner() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        (,, bool initiallyCollected) = auction.endAuction(LOT_ID);
+
+        assertFalse(initiallyCollected);
+        assertFalse(auction.blacklistedWallets(bidderA));
+
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit WalletBlacklistUpdated(bidderA, true, block.timestamp);
+        vm.prank(operator);
+        bool paymentCollected = auction.settleAuctionPayment(LOT_ID);
+
+        assertFalse(paymentCollected);
+        assertFalse(auction.auctionPaymentCollected(LOT_ID));
+        assertTrue(auction.blacklistedWallets(bidderA));
+    }
+
+    function testWinnerPaymentRetryFailureDoesNotBlacklistWinner() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        vm.prank(bidderA);
+        bool paymentCollected = auction.settleAuctionPayment(LOT_ID);
+
+        assertFalse(paymentCollected);
+        assertFalse(auction.auctionPaymentCollected(LOT_ID));
+        assertFalse(auction.blacklistedWallets(bidderA));
     }
 
     function testSettleAuctionPaymentSucceedsForWinnerAfterInitialEndFailure() external {
