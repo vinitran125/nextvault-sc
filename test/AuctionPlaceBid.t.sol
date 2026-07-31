@@ -86,10 +86,10 @@ contract AuctionPlaceBidTest is Test {
         vm.warp(previousEndTime - 4 minutes);
         uint256 newEndTime = block.timestamp + 5 minutes;
 
-        vm.expectEmit(true, false, false, true, address(auction));
-        emit AuctionExtended(LOT_ID, newEndTime);
         vm.expectEmit(true, true, false, true, address(auction));
         emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, block.timestamp);
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit AuctionExtended(LOT_ID, newEndTime);
 
         vm.prank(bidderA);
         auction.placeBid(LOT_ID, STARTING_BID);
