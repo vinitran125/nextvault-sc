@@ -200,6 +200,16 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, bool isApproved, uint256 blockTimestamp
     );
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
+    event AuctionRestarted(
+        bytes32 indexed lotId,
+        uint256 indexed previousRound,
+        uint256 indexed newRound,
+        address defaultedWinner,
+        uint256 forfeitedDeposit,
+        uint256 startTime,
+        uint256 endTime,
+        uint256 blockTimestamp
+    );
 
     IERC20 public token;
     uint256 private tokenDecimal;
@@ -230,6 +240,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     address public nftDesignManager;
     mapping(address => bool) public blacklistedWallets;
+    mapping(bytes32 => uint256) public auctionBidRound;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -426,8 +437,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         itemToCurrentBid[lotId] = amount;
         itemToAutoBid[lotId] = false;
 
-        _extendAuctionIfNeeded(lotId);
         emit BidPlaced(lotId, msg.sender, currentBid, amount, block.timestamp);
+        _extendAuctionIfNeeded(lotId);
     }
 
     function placeBidFor(bytes32 lotId, address bidder, uint256 amount) external onlyRole(OPERATOR_ROLE) {
@@ -451,8 +462,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         itemToAutoBid[lotId] = true;
 
         uint256 previousBid = currentBid == 0 ? auction.startingBid : currentBid;
-        _extendAuctionIfNeeded(lotId);
+
         emit BidPlaced(lotId, bidder, previousBid, amount, block.timestamp);
+        _extendAuctionIfNeeded(lotId);
+
     }
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {
@@ -503,7 +516,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (!cancelledAuctions[lotId]) {
             if (itemToCurrentBidder[lotId] == bidder) revert CurrentLeaderCannotWithdrawDeposit();
-            if (itemBidderToMaxBid[lotId][bidder] > itemToCurrentBid[lotId]) revert InvalidBidAmount();
         }
 
         uint256 refundAmount = itemBidderToMaxBid[lotId][bidder] / 10;
@@ -599,11 +611,51 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
-        if (!paymentCollected && hasRole(OPERATOR_ROLE, msg.sender) && !blacklistedWallets[winner]) {
-            _setWalletBlacklist(winner, true);
-        }
-
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
+
+        if (!paymentCollected && hasRole(OPERATOR_ROLE, msg.sender)) {
+            _setWalletBlacklist(winner, true);
+            _restartAuction(lotId, winner, winningBid);
+        }
+    }
+
+    function _restartAuction(bytes32 lotId, address defaultedWinner, uint256 winningBid) internal {
+        uint256 forfeitedDeposit =
+            itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][defaultedWinner] / 10 : winningBid / 10;
+
+        if (itemToAutoBid[lotId]) {
+            itemBidderToMaxBid[lotId][defaultedWinner] = 0;
+        }
+        if (forfeitedDeposit > 0) token.safeTransfer(treasury, forfeitedDeposit);
+
+        uint256 previousRound = auctionBidRound[lotId];
+        uint256 newRound = previousRound + 1;
+        AuctionConfig storage auction = auctions[lotId];
+
+        itemToCurrentBid[lotId] = 0;
+        itemToCurrentBidder[lotId] = address(0);
+        itemToAutoBid[lotId] = false;
+        itemToMaxBid[lotId] = 0;
+        itemToMaxBidder[lotId] = address(0);
+        auctionBidRound[lotId] = newRound;
+
+        auction.startTime = block.timestamp;
+        auction.endTime = block.timestamp + auction.auctionDurationSeconds;
+        auction.previewDurationSeconds = 0;
+        endedAuctions[lotId] = false;
+        auctionPaymentCollected[lotId] = false;
+        cancelledAuctions[lotId] = false;
+
+        emit AuctionRestarted(
+            lotId,
+            previousRound,
+            newRound,
+            defaultedWinner,
+            forfeitedDeposit,
+            auction.startTime,
+            auction.endTime,
+            block.timestamp
+        );
     }
 
     function withdrawAuction(bytes32 lotId) external onlyRole(OPERATOR_ROLE) {

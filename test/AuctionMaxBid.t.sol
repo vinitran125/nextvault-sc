@@ -201,10 +201,10 @@ contract AuctionMaxBidTest is Test {
         vm.warp(previousEndTime - 4 minutes);
         uint256 newEndTime = block.timestamp + 5 minutes;
 
-        vm.expectEmit(true, false, false, true, address(auction));
-        emit AuctionExtended(LOT_ID, newEndTime);
         vm.expectEmit(true, true, false, true, address(auction));
         emit BidPlaced(LOT_ID, bidderA, STARTING_BID, STARTING_BID, block.timestamp);
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit AuctionExtended(LOT_ID, newEndTime);
 
         vm.prank(operator);
         auction.placeBidFor(LOT_ID, bidderA, STARTING_BID);
