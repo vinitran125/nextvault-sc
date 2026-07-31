@@ -25,7 +25,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,uint256 amount,bytes32 nonce,uint256 deadline)"
     );
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
-        "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint16 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
+        "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint256 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
     );
 
     enum AuctionStatus {
@@ -48,7 +48,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 previewDurationSeconds;
         uint256 auctionDurationSeconds;
         uint256 nftMaxSupply;
-        uint16 nftPriceRatioBps;
+        uint256 nftPriceRatioBps;
         uint256 nftPrice;
         string thumbnailUrl;
     }
@@ -64,7 +64,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 variant1Quantity;
         uint256 variant2Quantity;
         uint256 variant3Quantity;
-        uint16 nftPriceRatioBps;
+        uint256 nftPriceRatioBps;
         string nftName;
         string nftSymbol;
         string thumbnailUrl;
@@ -99,6 +99,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidStartingBid();
     error InvalidAuctionDuration();
     error InvalidNftConfig();
+    error InvalidNftPriceRatio();
     error InvalidVariantAllocation();
     error AuctionNotFound();
     error AuctionAlreadyCancelled();
@@ -125,6 +126,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidSettlementConfig();
     error AuctionDetailsLocked();
     error InvalidDesignManager();
+    error BlacklistedWallet();
 
     event AuctionCreated(bytes32 indexed lotId, address indexed nftCollection, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
@@ -197,6 +199,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     event ConsignmentDepositRefunded(
         bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, bool isApproved, uint256 blockTimestamp
     );
+    event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
 
     IERC20 public token;
     uint256 private tokenDecimal;
@@ -226,6 +229,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     mapping(bytes32 => address) private itemToMaxBidder;
 
     address public nftDesignManager;
+    mapping(address => bool) public blacklistedWallets;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -267,6 +271,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit SettlementConfigUpdated(treasury_, buyerPremiumBps_, sellerCommissionBps_, block.timestamp);
     }
 
+    function setWalletBlacklist(address wallet, bool blacklisted) external onlyRole(OPERATOR_ROLE) {
+        _setWalletBlacklist(wallet, blacklisted);
+    }
+
+    function _setWalletBlacklist(address wallet, bool blacklisted) internal {
+        if (wallet == address(0)) revert InvalidConfig();
+
+        blacklistedWallets[wallet] = blacklisted;
+        emit WalletBlacklistUpdated(wallet, blacklisted, block.timestamp);
+    }
+
     function createAuction(
         CreateAuctionParams calldata params,
         bytes32 nonce,
@@ -291,7 +306,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             revert InvalidStartingBid();
         }
         if (params.auctionDurationSeconds == 0) revert InvalidAuctionDuration();
-        if (params.nftPriceRatioBps == 0) revert InvalidNftConfig();
+        if (params.nftPriceRatioBps == 0) revert InvalidNftPriceRatio();
 
         uint256 nftMaxSupply = params.variant1Quantity + params.variant2Quantity + params.variant3Quantity;
         if (nftMaxSupply == 0) revert InvalidVariantAllocation();
@@ -365,6 +380,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function buyNFT(bytes32 lotId, uint256 quantity) external {
+        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
         if (!auctionExists[lotId]) revert AuctionNotFound();
         AuctionConfig storage auction = auctions[lotId];
 
@@ -388,6 +404,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function placeBid(bytes32 lotId, uint256 amount) external {
+        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig storage auction = auctions[lotId];
@@ -439,6 +456,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {
+        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig memory auction = auctions[lotId];
@@ -581,6 +599,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
+        if (!paymentCollected && hasRole(OPERATOR_ROLE, msg.sender) && !blacklistedWallets[winner]) {
+            _setWalletBlacklist(winner, true);
+        }
+
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
 
@@ -621,6 +643,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     function depositConsignment(ConsignmentDepositAuthorization calldata authorization, bytes calldata signature)
         external
     {
+        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
         if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
         if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
         if (authorization.amount == 0) revert InvalidAmount();

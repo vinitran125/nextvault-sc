@@ -459,7 +459,7 @@ contract AuctionCreateTest is Test {
     function testCreateAuctionRevertsWhenNftConfigIsInvalid() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         params.nftPriceRatioBps = 0;
-        _expectCreateRevert(params, "zero-ratio", Auction.InvalidNftConfig.selector);
+        _expectCreateRevert(params, "zero-ratio", Auction.InvalidNftPriceRatio.selector);
 
         params = _defaultParams();
         params.lowEstimate = 1;
@@ -467,6 +467,18 @@ contract AuctionCreateTest is Test {
         params.startingBid = 1;
         params.nftPriceRatioBps = 1;
         _expectCreateRevert(params, "zero-price", Auction.InvalidNftConfig.selector);
+    }
+
+    function testCreateAuctionSupportsNftPriceRatioAboveUint16Max() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.nftPriceRatioBps = 67_400;
+        bytes32 nonce = _nonce("large-ratio");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        Auction.AuctionConfig memory config = auction.getAuction(params.lotId);
+        assertEq(config.nftPriceRatioBps, 67_400);
     }
 
     function testCreateAuctionRevertsWhenRarityAllocationIsZero() external {
