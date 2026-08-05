@@ -103,6 +103,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidVariantAllocation();
     error AuctionNotFound();
     error AuctionAlreadyCancelled();
+    error AuctionNotWithdrawn();
     error AuctionAlreadyEnded();
     error AuctionPaymentAlreadyCollected();
     error AuctionIsCancelled();
@@ -165,6 +166,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 totalPrice,
         uint256 lastTokenId,
         uint256 blockTimestamp
+    );
+    event NFTRefundClaimed(
+        bytes32 indexed lotId, address indexed holder, uint256 quantity, uint256 refundAmount, uint256 blockTimestamp
     );
     event BidPlaced(
         bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
@@ -675,6 +679,35 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (itemToCurrentBidder[lotId] != address(0)) {
             _refundBid(lotId);
         }
+    }
+
+    function claimNFTRefund(bytes32 lotId, uint256[] calldata tokenIds) external {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+        if (!cancelledAuctions[lotId]) revert AuctionNotWithdrawn();
+
+        uint256 quantity = tokenIds.length;
+        if (quantity == 0) revert InvalidQuantity();
+
+        AuctionConfig storage auction = auctions[lotId];
+        LotNFT nftCollection = LotNFT(auction.nftCollection);
+        nftCollection.burnBatchForRefund(msg.sender, tokenIds);
+
+        uint256 refundAmount = auction.nftPrice * quantity;
+        token.safeTransfer(msg.sender, refundAmount);
+
+        emit NFTRefundClaimed(lotId, msg.sender, quantity, refundAmount, block.timestamp);
+    }
+
+    function getNFTRefundAmount(bytes32 lotId, address holder)
+        external
+        view
+        returns (uint256 quantity, uint256 refundAmount)
+    {
+        if (!auctionExists[lotId]) revert AuctionNotFound();
+
+        AuctionConfig storage auction = auctions[lotId];
+        quantity = LotNFT(auction.nftCollection).balanceOf(holder);
+        if (cancelledAuctions[lotId]) refundAmount = quantity * auction.nftPrice;
     }
 
     function onLotNFTTransfer(bytes32 lotId, address from, address to, uint256 tokenId) external {

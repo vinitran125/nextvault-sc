@@ -38,6 +38,9 @@ contract AuctionEndWithdrawTest is Test {
         bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
     );
     event AuctionWithdrawn(bytes32 indexed lotId, address indexed highestBidder, uint256 blockTimestamp);
+    event NFTRefundClaimed(
+        bytes32 indexed lotId, address indexed holder, uint256 quantity, uint256 refundAmount, uint256 blockTimestamp
+    );
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event MaxBidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
@@ -679,6 +682,138 @@ contract AuctionEndWithdrawTest is Test {
 
         assertEq(token.balanceOf(bidderA), bidderBalanceBeforeWithdraw + STARTING_BID / 10);
         assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testHolderCanClaimBulkNftRefundAfterWithdraw() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNft(bidderA);
+        _buyNft(bidderA);
+        LotNFT nftCollection = LotNFT(config.nftCollection);
+        uint256 bidderBalanceBeforeClaim = token.balanceOf(bidderA);
+
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+
+        uint256[] memory tokenIds = new uint256[](2);
+        tokenIds[0] = 1;
+        tokenIds[1] = 2;
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit NFTRefundClaimed(LOT_ID, bidderA, 2, NFT_PRICE * 2, block.timestamp);
+        vm.prank(bidderA);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBeforeClaim + NFT_PRICE * 2);
+        assertEq(token.balanceOf(address(auction)), 0);
+        vm.expectRevert();
+        nftCollection.ownerOf(1);
+        vm.expectRevert();
+        nftCollection.ownerOf(2);
+    }
+
+    function testGetNftRefundAmountTracksWithdrawAndClaims() external {
+        _createAuction(0);
+        _buyNft(bidderA);
+        _buyNft(bidderA);
+
+        (uint256 quantityBeforeWithdraw, uint256 amountBeforeWithdraw) = auction.getNFTRefundAmount(LOT_ID, bidderA);
+        assertEq(quantityBeforeWithdraw, 2);
+        assertEq(amountBeforeWithdraw, 0);
+
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+
+        (uint256 refundableQuantity, uint256 refundableAmount) = auction.getNFTRefundAmount(LOT_ID, bidderA);
+        assertEq(refundableQuantity, 2);
+        assertEq(refundableAmount, NFT_PRICE * 2);
+
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = 1;
+        vm.prank(bidderA);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+
+        (uint256 remainingQuantity, uint256 remainingAmount) = auction.getNFTRefundAmount(LOT_ID, bidderA);
+        assertEq(remainingQuantity, 1);
+        assertEq(remainingAmount, NFT_PRICE);
+    }
+
+    function testCurrentHolderCanClaimNftRefundAfterTransfer() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNft(bidderA);
+        LotNFT nftCollection = LotNFT(config.nftCollection);
+        vm.prank(bidderA);
+        nftCollection.transferFrom(bidderA, bidderB, 1);
+        uint256 bidderBalanceBeforeClaim = token.balanceOf(bidderB);
+
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = 1;
+        vm.prank(bidderB);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+
+        assertEq(token.balanceOf(bidderB), bidderBalanceBeforeClaim + NFT_PRICE);
+        assertEq(token.balanceOf(address(auction)), 0);
+    }
+
+    function testBlacklistedHolderCanClaimExistingNftRefund() external {
+        _createAuction(0);
+        _buyNft(bidderA);
+        vm.startPrank(operator);
+        auction.setWalletBlacklist(bidderA, true);
+        auction.withdrawAuction(LOT_ID);
+        vm.stopPrank();
+
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = 1;
+        vm.prank(bidderA);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+
+        assertEq(token.balanceOf(bidderA), STARTING_BALANCE);
+    }
+
+    function testNftRefundRevertsBeforeWithdraw() external {
+        _createAuction(0);
+        _buyNft(bidderA);
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = 1;
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.AuctionNotWithdrawn.selector);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+    }
+
+    function testNftRefundRejectsEmptyListAndNonOwner() external {
+        _createAuction(0);
+        _buyNft(bidderA);
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+
+        uint256[] memory emptyTokenIds = new uint256[](0);
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidQuantity.selector);
+        auction.claimNFTRefund(LOT_ID, emptyTokenIds);
+
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = 1;
+        vm.prank(bidderB);
+        vm.expectRevert(LotNFT.NotNftOwner.selector);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+    }
+
+    function testNftRefundCannotBeClaimedTwice() external {
+        _createAuction(0);
+        _buyNft(bidderA);
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+
+        uint256[] memory tokenIds = new uint256[](1);
+        tokenIds[0] = 1;
+        vm.startPrank(bidderA);
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+        vm.expectRevert();
+        auction.claimNFTRefund(LOT_ID, tokenIds);
+        vm.stopPrank();
     }
 
     function testWithdrawLeavesAutoBidDepositForBackendRefund() external {
