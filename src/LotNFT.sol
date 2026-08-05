@@ -22,6 +22,7 @@ contract LotNFT is Initializable, ERC721Upgradeable {
     error InvalidVariantAllocation();
     error VariantAlreadyAssigned();
     error WinnerVariantAlreadyMinted();
+    error NotNftOwner();
 
     address public auction;
     address public designManager;
@@ -106,6 +107,16 @@ contract LotNFT is Initializable, ERC721Upgradeable {
         mintedByWallet[to] += quantity;
         for (uint256 i = 0; i < quantity; i++) {
             lastTokenId = _mintNext(to);
+        }
+    }
+
+    /// @notice Burns multiple tokens whose holder is claiming a refund from a withdrawn auction.
+    function burnBatchForRefund(address holder, uint256[] calldata tokenIds) external {
+        if (msg.sender != auction) revert OnlyAuction();
+        for (uint256 i = 0; i < tokenIds.length; i++) {
+            uint256 tokenId = tokenIds[i];
+            if (_ownerOf(tokenId) != holder) revert NotNftOwner();
+            _burn(tokenId);
         }
     }
 
