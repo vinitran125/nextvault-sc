@@ -237,10 +237,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     mapping(bytes32 => mapping(address => uint256)) private itemBidderToMaxBid;
     mapping(bytes32 => uint256) private itemToMaxBid;
     mapping(bytes32 => address) private itemToMaxBidder;
+    mapping(bytes32 => uint256) public auctionBidRound;
 
     address public nftDesignManager;
     mapping(address => bool) public blacklistedWallets;
-    mapping(bytes32 => uint256) public auctionBidRound;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -313,7 +313,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (params.lowEstimate == 0 || params.highEstimate < params.lowEstimate) {
             revert InvalidEstimate();
         }
-        if (params.startingBid == 0 || params.startingBid < params.lowEstimate) {
+        if (params.startingBid == 0 || params.startingBid > params.lowEstimate) {
             revert InvalidStartingBid();
         }
         if (params.auctionDurationSeconds == 0) revert InvalidAuctionDuration();
@@ -465,7 +465,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         emit BidPlaced(lotId, bidder, previousBid, amount, block.timestamp);
         _extendAuctionIfNeeded(lotId);
-
     }
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {

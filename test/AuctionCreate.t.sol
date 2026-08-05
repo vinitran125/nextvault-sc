@@ -445,8 +445,19 @@ contract AuctionCreateTest is Test {
         _expectCreateRevert(params, "zero-starting", Auction.InvalidStartingBid.selector);
 
         params = _defaultParams();
-        params.startingBid = params.lowEstimate - 1;
-        _expectCreateRevert(params, "starting-below-low", Auction.InvalidStartingBid.selector);
+        params.startingBid = params.lowEstimate + 1;
+        _expectCreateRevert(params, "starting-above-low", Auction.InvalidStartingBid.selector);
+    }
+
+    function testCreateAuctionAllowsStartingBidBelowLowEstimate() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.startingBid = params.lowEstimate - USDC;
+        bytes32 nonce = _nonce("starting-below-low");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        assertEq(auction.getAuction(LOT_ID).startingBid, params.startingBid);
     }
 
     function testCreateAuctionRevertsWhenAuctionDurationIsZero() external {
