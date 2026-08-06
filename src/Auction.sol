@@ -168,7 +168,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 blockTimestamp
     );
     event NFTRefundClaimed(
-        bytes32 indexed lotId, address indexed holder, uint256 quantity, uint256 refundAmount, uint256 blockTimestamp
+        bytes32 indexed lotId, address indexed holder, uint256[] tokenIds, uint256 refundAmount, uint256 blockTimestamp
     );
     event BidPlaced(
         bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
@@ -695,7 +695,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 refundAmount = auction.nftPrice * quantity;
         token.safeTransfer(msg.sender, refundAmount);
 
-        emit NFTRefundClaimed(lotId, msg.sender, quantity, refundAmount, block.timestamp);
+        emit NFTRefundClaimed(lotId, msg.sender, tokenIds, refundAmount, block.timestamp);
     }
 
     function getNFTRefundAmount(bytes32 lotId, address holder)
