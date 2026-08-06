@@ -39,7 +39,7 @@ contract AuctionEndWithdrawTest is Test {
     );
     event AuctionWithdrawn(bytes32 indexed lotId, address indexed highestBidder, uint256 blockTimestamp);
     event NFTRefundClaimed(
-        bytes32 indexed lotId, address indexed holder, uint256 quantity, uint256 refundAmount, uint256 blockTimestamp
+        bytes32 indexed lotId, address indexed holder, uint256[] tokenIds, uint256 refundAmount, uint256 blockTimestamp
     );
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event MaxBidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
@@ -698,7 +698,7 @@ contract AuctionEndWithdrawTest is Test {
         tokenIds[0] = 1;
         tokenIds[1] = 2;
         vm.expectEmit(true, true, false, true, address(auction));
-        emit NFTRefundClaimed(LOT_ID, bidderA, 2, NFT_PRICE * 2, block.timestamp);
+        emit NFTRefundClaimed(LOT_ID, bidderA, tokenIds, NFT_PRICE * 2, block.timestamp);
         vm.prank(bidderA);
         auction.claimNFTRefund(LOT_ID, tokenIds);
 
