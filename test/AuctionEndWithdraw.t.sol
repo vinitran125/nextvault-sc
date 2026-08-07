@@ -112,6 +112,36 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(auction.antiSnipeWindowSeconds(), 2 minutes);
     }
 
+    function testAuctionTermsAreSnapshottedAtCreation() external {
+        Auction.AuctionConfig memory original = _createAuction(0);
+
+        vm.prank(admin);
+        auction.setSettlementConfig(admin, 2_000, 500);
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+
+        Auction.AuctionConfig memory stored = auction.getAuction(LOT_ID);
+        assertEq(stored.paymentGracePeriodSeconds, 1 hours);
+        assertEq(stored.antiSnipeWindowSeconds, 5 minutes);
+        assertEq(stored.buyerPremiumBps, 1_000);
+        assertEq(stored.sellerCommissionBps, 1_000);
+        assertEq(stored.startTime, original.startTime);
+        assertEq(stored.endTime, original.endTime);
+    }
+
+    function testNewAuctionSnapshotsLatestTimingAndFeeConfig() external {
+        vm.prank(admin);
+        auction.setSettlementConfig(admin, 2_000, 500);
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+
+        Auction.AuctionConfig memory config = _createAuction(0);
+        assertEq(config.paymentGracePeriodSeconds, 30 minutes);
+        assertEq(config.antiSnipeWindowSeconds, 2 minutes);
+        assertEq(config.buyerPremiumBps, 2_000);
+        assertEq(config.sellerCommissionBps, 500);
+    }
+
     function testAuctionTimingConfigRejectsUnauthorizedCallerAndZeroValues() external {
         vm.prank(stranger);
         vm.expectRevert();
@@ -161,6 +191,24 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(token.balanceOf(consignor), 9_000 * USDC);
         assertEq(token.balanceOf(admin), 2_000 * USDC);
         assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testFeeConfigChangeDoesNotAffectExistingAuctionSettlement() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+
+        vm.prank(admin);
+        auction.setSettlementConfig(admin, 2_000, 500);
+
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        _approveRemainingPayment(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        (,, bool paymentCollected) = auction.endAuction(LOT_ID);
+
+        assertTrue(paymentCollected);
+        assertEq(token.balanceOf(consignor), 9_000 * USDC);
+        assertEq(token.balanceOf(admin), 2_000 * USDC);
     }
 
     function testEndAuctionUsesMaxBidDepositWhenHammerPriceIsLowerThanMaxBid() external {
@@ -634,16 +682,17 @@ contract AuctionEndWithdrawTest is Test {
     }
 
     function testPaymentDeadlineKeepsConfigFromAuctionEnd() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+
         vm.prank(operator);
         auction.setAuctionTimingConfig(10 minutes, 5 minutes);
 
-        Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         vm.warp(config.endTime);
 
         vm.prank(operator);
         auction.endAuction(LOT_ID);
-        uint256 originalDeadline = config.endTime + 10 minutes;
+        uint256 originalDeadline = config.endTime + 1 hours;
 
         vm.prank(operator);
         auction.setAuctionTimingConfig(2 hours, 5 minutes);
