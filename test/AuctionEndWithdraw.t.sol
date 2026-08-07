@@ -44,6 +44,9 @@ contract AuctionEndWithdrawTest is Test {
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event MaxBidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
+    event AuctionTimingConfigUpdated(
+        uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
+    );
     event AuctionRestarted(
         bytes32 indexed lotId,
         uint256 indexed previousRound,
@@ -94,6 +97,32 @@ contract AuctionEndWithdrawTest is Test {
         assertTrue(auction.endedAuctions(LOT_ID));
         assertFalse(auction.auctionPaymentCollected(LOT_ID));
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Ended));
+    }
+
+    function testAuctionTimingConfigUsesDefaultsAndCanBeUpdatedByOperator() external {
+        assertEq(auction.paymentGracePeriodSeconds(), 1 hours);
+        assertEq(auction.antiSnipeWindowSeconds(), 5 minutes);
+
+        vm.expectEmit(false, false, false, true, address(auction));
+        emit AuctionTimingConfigUpdated(30 minutes, 2 minutes, block.timestamp);
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+
+        assertEq(auction.paymentGracePeriodSeconds(), 30 minutes);
+        assertEq(auction.antiSnipeWindowSeconds(), 2 minutes);
+    }
+
+    function testAuctionTimingConfigRejectsUnauthorizedCallerAndZeroValues() external {
+        vm.prank(stranger);
+        vm.expectRevert();
+        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+
+        vm.startPrank(operator);
+        vm.expectRevert(Auction.InvalidAuctionTimingConfig.selector);
+        auction.setAuctionTimingConfig(0, 2 minutes);
+        vm.expectRevert(Auction.InvalidAuctionTimingConfig.selector);
+        auction.setAuctionTimingConfig(30 minutes, 0);
+        vm.stopPrank();
     }
 
     function testEndAuctionWithWinnerStartsPaymentPendingWhenAllowanceIsMissing() external {
@@ -233,6 +262,8 @@ contract AuctionEndWithdrawTest is Test {
         assertFalse(auction.blacklistedWallets(bidderA));
         uint256 treasuryBalanceBefore = token.balanceOf(admin);
 
+        _expirePaymentGrace();
+
         vm.expectEmit(true, false, false, true, address(auction));
         emit WalletBlacklistUpdated(bidderA, true, block.timestamp);
         vm.prank(operator);
@@ -271,6 +302,8 @@ contract AuctionEndWithdrawTest is Test {
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
 
+        _expirePaymentGrace();
+
         uint256 restartedAt = block.timestamp;
         vm.expectEmit(true, true, false, true, address(auction));
         emit WalletBlacklistUpdated(bidderA, true, restartedAt);
@@ -303,6 +336,7 @@ contract AuctionEndWithdrawTest is Test {
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
@@ -336,6 +370,7 @@ contract AuctionEndWithdrawTest is Test {
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
@@ -366,6 +401,7 @@ contract AuctionEndWithdrawTest is Test {
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
@@ -399,6 +435,7 @@ contract AuctionEndWithdrawTest is Test {
         uint256 treasuryBalanceBefore = token.balanceOf(admin);
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
@@ -411,6 +448,7 @@ contract AuctionEndWithdrawTest is Test {
         vm.warp(roundOne.endTime);
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
@@ -440,6 +478,7 @@ contract AuctionEndWithdrawTest is Test {
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         auction.settleAuctionPayment(LOT_ID);
         vm.stopPrank();
 
@@ -489,6 +528,8 @@ contract AuctionEndWithdrawTest is Test {
         auction.endAuction(LOT_ID);
         uint256 treasuryBalanceBefore = token.balanceOf(admin);
 
+        _expirePaymentGrace();
+
         vm.prank(operator);
         auction.settleAuctionPayment(LOT_ID);
 
@@ -512,6 +553,8 @@ contract AuctionEndWithdrawTest is Test {
         vm.prank(operator);
         auction.refundMaxBid(LOT_ID, bidderB);
         assertEq(token.balanceOf(bidderB) - bidderBalanceBeforeRefund, 1_100 * USDC);
+
+        _expirePaymentGrace();
 
         vm.prank(operator);
         auction.settleAuctionPayment(LOT_ID);
@@ -559,6 +602,7 @@ contract AuctionEndWithdrawTest is Test {
 
         vm.startPrank(operator);
         auction.endAuction(LOT_ID);
+        _expirePaymentGrace();
         bool firstRetry = auction.settleAuctionPayment(LOT_ID);
         vm.expectRevert(Auction.AuctionNotEnded.selector);
         auction.settleAuctionPayment(LOT_ID);
@@ -567,6 +611,44 @@ contract AuctionEndWithdrawTest is Test {
         assertFalse(firstRetry);
         assertFalse(auction.auctionPaymentCollected(LOT_ID));
         assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testOperatorFailedRetryCannotRestartBeforePaymentGraceDeadline() external {
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        uint256 deadline = config.endTime + 1 hours;
+        assertEq(auction.auctionPaymentDeadline(LOT_ID), deadline);
+
+        vm.warp(deadline - 1);
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(Auction.AuctionPaymentGracePeriodActive.selector, deadline));
+        auction.settleAuctionPayment(LOT_ID);
+
+        assertTrue(auction.endedAuctions(LOT_ID));
+        assertFalse(auction.blacklistedWallets(bidderA));
+    }
+
+    function testPaymentDeadlineKeepsConfigFromAuctionEnd() external {
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(10 minutes, 5 minutes);
+
+        Auction.AuctionConfig memory config = _createAuction(0);
+        _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
+        vm.warp(config.endTime);
+
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+        uint256 originalDeadline = config.endTime + 10 minutes;
+
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(2 hours, 5 minutes);
+
+        assertEq(auction.auctionPaymentDeadline(LOT_ID), originalDeadline);
     }
 
     function testEndAuctionAcceptsExactEndTimestamp() external {
@@ -1008,6 +1090,10 @@ contract AuctionEndWithdrawTest is Test {
         uint256 remainingPayment = winningBid + buyerPremium - winningBid / 10;
         vm.prank(winner);
         token.approve(address(auction), remainingPayment);
+    }
+
+    function _expirePaymentGrace() private {
+        vm.warp(auction.auctionPaymentDeadline(LOT_ID));
     }
 
     function _sign(Auction.CreateAuctionParams memory params, bytes32 nonce, uint256 deadline)

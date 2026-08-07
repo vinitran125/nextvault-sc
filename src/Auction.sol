@@ -19,6 +19,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant DEFAULT_BUYER_PREMIUM_BPS = 1_000;
     uint16 public constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
+    uint256 public constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
+    uint256 public constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
     string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
     string internal constant NFT_COLLECTION_SYMBOL = "NV";
     bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
@@ -125,6 +127,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidItemDepositStatus();
     error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
+    error InvalidAuctionTimingConfig();
+    error AuctionPaymentGracePeriodActive(uint256 deadline);
     error AuctionDetailsLocked();
     error InvalidDesignManager();
     error BlacklistedWallet();
@@ -147,6 +151,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     );
     event SettlementConfigUpdated(
         address indexed treasury, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
+    );
+    event AuctionTimingConfigUpdated(
+        uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
     event AuctionSettled(
         bytes32 indexed lotId,
@@ -246,6 +253,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     address public nftDesignManager;
     mapping(address => bool) public blacklistedWallets;
 
+    uint256 public paymentGracePeriodSeconds;
+    uint256 public antiSnipeWindowSeconds;
+    mapping(bytes32 => uint256) public auctionPaymentDeadline;
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -267,6 +278,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         treasury = admin;
         buyerPremiumBps = DEFAULT_BUYER_PREMIUM_BPS;
         sellerCommissionBps = DEFAULT_SELLER_COMMISSION_BPS;
+        paymentGracePeriodSeconds = DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS;
+        antiSnipeWindowSeconds = DEFAULT_ANTI_SNIPE_WINDOW_SECONDS;
     }
 
     function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -284,6 +297,20 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         sellerCommissionBps = sellerCommissionBps_;
 
         emit SettlementConfigUpdated(treasury_, buyerPremiumBps_, sellerCommissionBps_, block.timestamp);
+    }
+
+    function setAuctionTimingConfig(uint256 paymentGracePeriodSeconds_, uint256 antiSnipeWindowSeconds_)
+        external
+        onlyRole(OPERATOR_ROLE)
+    {
+        if (paymentGracePeriodSeconds_ == 0 || antiSnipeWindowSeconds_ == 0) {
+            revert InvalidAuctionTimingConfig();
+        }
+
+        paymentGracePeriodSeconds = paymentGracePeriodSeconds_;
+        antiSnipeWindowSeconds = antiSnipeWindowSeconds_;
+
+        emit AuctionTimingConfigUpdated(paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
     }
 
     function setWalletBlacklist(address wallet, bool blacklisted) external onlyRole(OPERATOR_ROLE) {
@@ -555,6 +582,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         winningBid = itemToCurrentBid[lotId];
         paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
+        auctionPaymentDeadline[lotId] =
+            winner != address(0) && !paymentCollected ? auctions[lotId].endTime + paymentGracePeriodSeconds : 0;
 
         emit AuctionEnded(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
@@ -620,9 +649,14 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
 
+        if (paymentCollected) auctionPaymentDeadline[lotId] = 0;
+
         emit WinnerPaymentCollected(lotId, winner, winningBid, paymentCollected, block.timestamp);
 
         if (!paymentCollected && hasRole(OPERATOR_ROLE, msg.sender)) {
+            if (block.timestamp < auctionPaymentDeadline[lotId]) {
+                revert AuctionPaymentGracePeriodActive(auctionPaymentDeadline[lotId]);
+            }
             _setWalletBlacklist(winner, true);
             _restartAuction(lotId, winner, winningBid);
         }
@@ -653,6 +687,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         auction.previewDurationSeconds = 0;
         endedAuctions[lotId] = false;
         auctionPaymentCollected[lotId] = false;
+        auctionPaymentDeadline[lotId] = 0;
         cancelledAuctions[lotId] = false;
 
         emit AuctionRestarted(
@@ -918,9 +953,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function _extendAuctionIfNeeded(bytes32 lotId) internal {
-        if (block.timestamp + 5 minutes < auctions[lotId].endTime) return;
+        uint256 antiSnipeWindow = antiSnipeWindowSeconds;
+        if (block.timestamp + antiSnipeWindow < auctions[lotId].endTime) return;
 
-        uint256 newEndTime = block.timestamp + 5 minutes;
+        uint256 newEndTime = block.timestamp + antiSnipeWindow;
         auctions[lotId].endTime = newEndTime;
         emit AuctionExtended(lotId, newEndTime);
     }
