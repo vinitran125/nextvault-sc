@@ -132,6 +132,24 @@ contract AuctionPlaceBidTest is Test {
         assertEq(auction.getAuction(LOT_ID).endTime, newEndTime);
     }
 
+    function testAntiSnipeConfigChangeDoesNotAffectExistingAuction() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(1 hours, 2 minutes);
+
+        uint256 previousEndTime = auction.getAuction(LOT_ID).endTime;
+        vm.warp(previousEndTime - 4 minutes);
+        uint256 newEndTime = block.timestamp + 5 minutes;
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, STARTING_BID);
+
+        assertEq(auction.getAuction(LOT_ID).endTime, newEndTime);
+    }
+
     function testPlaceBidRefundsPreviousManualBidder() external {
         _createActiveAuction();
         _buyNft(bidderA, 1);

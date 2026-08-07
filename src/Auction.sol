@@ -53,6 +53,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 nftPriceRatioBps;
         uint256 nftPrice;
         string thumbnailUrl;
+        uint256 paymentGracePeriodSeconds;
+        uint256 antiSnipeWindowSeconds;
+        uint16 buyerPremiumBps;
+        uint16 sellerCommissionBps;
     }
 
     struct CreateAuctionParams {
@@ -384,7 +388,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             nftMaxSupply: nftMaxSupply,
             nftPriceRatioBps: params.nftPriceRatioBps,
             nftPrice: nftPrice,
-            thumbnailUrl: params.thumbnailUrl
+            thumbnailUrl: params.thumbnailUrl,
+            paymentGracePeriodSeconds: _configuredPaymentGracePeriodSeconds(),
+            antiSnipeWindowSeconds: _configuredAntiSnipeWindowSeconds(),
+            buyerPremiumBps: buyerPremiumBps,
+            sellerCommissionBps: sellerCommissionBps
         });
         auctionExists[params.lotId] = true;
 
@@ -582,8 +590,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         winningBid = itemToCurrentBid[lotId];
         paymentCollected = _trySettleAuctionPayment(lotId, winner, winningBid);
         auctionPaymentCollected[lotId] = paymentCollected;
+        AuctionConfig storage auction = auctions[lotId];
         auctionPaymentDeadline[lotId] =
-            winner != address(0) && !paymentCollected ? auctions[lotId].endTime + paymentGracePeriodSeconds : 0;
+            winner != address(0) && !paymentCollected
+                ? auction.endTime + _auctionPaymentGracePeriodSeconds(auction)
+                : 0;
 
         emit AuctionEnded(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
@@ -591,7 +602,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     function _trySettleAuctionPayment(bytes32 lotId, address winner, uint256 winningBid) internal returns (bool) {
         if (winner == address(0)) return false;
         if (treasury == address(0)) revert InvalidSettlementConfig();
-        uint256 buyerPremium = (winningBid * buyerPremiumBps) / BPS_DENOMINATOR;
+        AuctionConfig storage auction = auctions[lotId];
+        uint256 buyerPremium = (winningBid * _auctionBuyerPremiumBps(auction)) / BPS_DENOMINATOR;
         uint256 totalPayment = winningBid + buyerPremium;
         uint256 deposited = itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][winner] / 10 : winningBid / 10;
         uint256 remainingPayment = totalPayment > deposited ? totalPayment - deposited : 0;
@@ -612,8 +624,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             emit MaxBidRefunded(lotId, winner, excessDeposit, block.timestamp);
         }
 
-        AuctionConfig storage auction = auctions[lotId];
-        uint256 sellerCommission = (winningBid * sellerCommissionBps) / BPS_DENOMINATOR;
+        uint256 sellerCommission = (winningBid * _auctionSellerCommissionBps(auction)) / BPS_DENOMINATOR;
         uint256 consignorProceeds = winningBid - sellerCommission;
         uint256 platformRevenue = buyerPremium + sellerCommission;
 
@@ -953,11 +964,42 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function _extendAuctionIfNeeded(bytes32 lotId) internal {
-        uint256 antiSnipeWindow = antiSnipeWindowSeconds;
-        if (block.timestamp + antiSnipeWindow < auctions[lotId].endTime) return;
+        AuctionConfig storage auction = auctions[lotId];
+        uint256 antiSnipeWindow = _auctionAntiSnipeWindowSeconds(auction);
+        if (block.timestamp + antiSnipeWindow < auction.endTime) return;
 
         uint256 newEndTime = block.timestamp + antiSnipeWindow;
-        auctions[lotId].endTime = newEndTime;
+        auction.endTime = newEndTime;
         emit AuctionExtended(lotId, newEndTime);
+    }
+
+    function _auctionPaymentGracePeriodSeconds(AuctionConfig storage auction) internal view returns (uint256) {
+        return auction.paymentGracePeriodSeconds == 0
+            ? DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS
+            : auction.paymentGracePeriodSeconds;
+    }
+
+    function _auctionAntiSnipeWindowSeconds(AuctionConfig storage auction) internal view returns (uint256) {
+        return auction.paymentGracePeriodSeconds == 0
+            ? DEFAULT_ANTI_SNIPE_WINDOW_SECONDS
+            : auction.antiSnipeWindowSeconds;
+    }
+
+    function _auctionBuyerPremiumBps(AuctionConfig storage auction) internal view returns (uint16) {
+        return auction.paymentGracePeriodSeconds == 0 ? DEFAULT_BUYER_PREMIUM_BPS : auction.buyerPremiumBps;
+    }
+
+    function _auctionSellerCommissionBps(AuctionConfig storage auction) internal view returns (uint16) {
+        return auction.paymentGracePeriodSeconds == 0
+            ? DEFAULT_SELLER_COMMISSION_BPS
+            : auction.sellerCommissionBps;
+    }
+
+    function _configuredPaymentGracePeriodSeconds() internal view returns (uint256) {
+        return paymentGracePeriodSeconds == 0 ? DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS : paymentGracePeriodSeconds;
+    }
+
+    function _configuredAntiSnipeWindowSeconds() internal view returns (uint256) {
+        return antiSnipeWindowSeconds == 0 ? DEFAULT_ANTI_SNIPE_WINDOW_SECONDS : antiSnipeWindowSeconds;
     }
 }
