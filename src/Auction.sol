@@ -21,6 +21,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint16 public constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
     uint256 public constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
     uint256 public constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
+    uint256 private constant MAX_AUCTION_TIMING_UPDATE_BATCH_SIZE = 10;
     string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
     string internal constant NFT_COLLECTION_SYMBOL = "NV";
     bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
@@ -158,6 +159,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     );
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
+    );
+    event AuctionTimingUpdated(
+        bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
     event AuctionSettled(
         bytes32 indexed lotId,
@@ -317,6 +321,26 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit AuctionTimingConfigUpdated(paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
     }
 
+    function updateAuctionTimingConfigs(bytes32[] calldata lotIds) external onlyRole(OPERATOR_ROLE) {
+        if (lotIds.length == 0 || lotIds.length > MAX_AUCTION_TIMING_UPDATE_BATCH_SIZE) revert InvalidAmount();
+
+        uint256 paymentGracePeriodSeconds_ = paymentGracePeriodSeconds;
+        uint256 antiSnipeWindowSeconds_ = antiSnipeWindowSeconds;
+
+        for (uint256 i; i < lotIds.length; ++i) {
+            bytes32 lotId = lotIds[i];
+            if (!auctionExists[lotId]) revert AuctionNotFound();
+
+            AuctionConfig storage auction = auctions[lotId];
+            if (block.timestamp >= auction.startTime) revert AuctionDetailsLocked();
+
+            auction.paymentGracePeriodSeconds = paymentGracePeriodSeconds_;
+            auction.antiSnipeWindowSeconds = antiSnipeWindowSeconds_;
+
+            emit AuctionTimingUpdated(lotId, paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
+        }
+    }
+
     function setWalletBlacklist(address wallet, bool blacklisted) external onlyRole(OPERATOR_ROLE) {
         _setWalletBlacklist(wallet, blacklisted);
     }
@@ -389,8 +413,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             nftPriceRatioBps: params.nftPriceRatioBps,
             nftPrice: nftPrice,
             thumbnailUrl: params.thumbnailUrl,
-            paymentGracePeriodSeconds: _configuredPaymentGracePeriodSeconds(),
-            antiSnipeWindowSeconds: _configuredAntiSnipeWindowSeconds(),
+            paymentGracePeriodSeconds: paymentGracePeriodSeconds,
+            antiSnipeWindowSeconds: antiSnipeWindowSeconds,
             buyerPremiumBps: buyerPremiumBps,
             sellerCommissionBps: sellerCommissionBps
         });
@@ -592,9 +616,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         auctionPaymentCollected[lotId] = paymentCollected;
         AuctionConfig storage auction = auctions[lotId];
         auctionPaymentDeadline[lotId] =
-            winner != address(0) && !paymentCollected
-                ? auction.endTime + _auctionPaymentGracePeriodSeconds(auction)
-                : 0;
+            winner != address(0) && !paymentCollected ? auction.endTime + auction.paymentGracePeriodSeconds : 0;
 
         emit AuctionEnded(lotId, winner, winningBid, paymentCollected, block.timestamp);
     }
@@ -603,7 +625,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (winner == address(0)) return false;
         if (treasury == address(0)) revert InvalidSettlementConfig();
         AuctionConfig storage auction = auctions[lotId];
-        uint256 buyerPremium = (winningBid * _auctionBuyerPremiumBps(auction)) / BPS_DENOMINATOR;
+        uint256 buyerPremium = (winningBid * auction.buyerPremiumBps) / BPS_DENOMINATOR;
         uint256 totalPayment = winningBid + buyerPremium;
         uint256 deposited = itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][winner] / 10 : winningBid / 10;
         uint256 remainingPayment = totalPayment > deposited ? totalPayment - deposited : 0;
@@ -624,7 +646,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             emit MaxBidRefunded(lotId, winner, excessDeposit, block.timestamp);
         }
 
-        uint256 sellerCommission = (winningBid * _auctionSellerCommissionBps(auction)) / BPS_DENOMINATOR;
+        uint256 sellerCommission = (winningBid * auction.sellerCommissionBps) / BPS_DENOMINATOR;
         uint256 consignorProceeds = winningBid - sellerCommission;
         uint256 platformRevenue = buyerPremium + sellerCommission;
 
@@ -965,41 +987,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     function _extendAuctionIfNeeded(bytes32 lotId) internal {
         AuctionConfig storage auction = auctions[lotId];
-        uint256 antiSnipeWindow = _auctionAntiSnipeWindowSeconds(auction);
-        if (block.timestamp + antiSnipeWindow < auction.endTime) return;
-
-        uint256 newEndTime = block.timestamp + antiSnipeWindow;
+        if (block.timestamp + auction.antiSnipeWindowSeconds < auction.endTime) return;
+        uint256 newEndTime = block.timestamp + auction.antiSnipeWindowSeconds;
         auction.endTime = newEndTime;
         emit AuctionExtended(lotId, newEndTime);
-    }
-
-    function _auctionPaymentGracePeriodSeconds(AuctionConfig storage auction) internal view returns (uint256) {
-        return auction.paymentGracePeriodSeconds == 0
-            ? DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS
-            : auction.paymentGracePeriodSeconds;
-    }
-
-    function _auctionAntiSnipeWindowSeconds(AuctionConfig storage auction) internal view returns (uint256) {
-        return auction.paymentGracePeriodSeconds == 0
-            ? DEFAULT_ANTI_SNIPE_WINDOW_SECONDS
-            : auction.antiSnipeWindowSeconds;
-    }
-
-    function _auctionBuyerPremiumBps(AuctionConfig storage auction) internal view returns (uint16) {
-        return auction.paymentGracePeriodSeconds == 0 ? DEFAULT_BUYER_PREMIUM_BPS : auction.buyerPremiumBps;
-    }
-
-    function _auctionSellerCommissionBps(AuctionConfig storage auction) internal view returns (uint16) {
-        return auction.paymentGracePeriodSeconds == 0
-            ? DEFAULT_SELLER_COMMISSION_BPS
-            : auction.sellerCommissionBps;
-    }
-
-    function _configuredPaymentGracePeriodSeconds() internal view returns (uint256) {
-        return paymentGracePeriodSeconds == 0 ? DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS : paymentGracePeriodSeconds;
-    }
-
-    function _configuredAntiSnipeWindowSeconds() internal view returns (uint256) {
-        return antiSnipeWindowSeconds == 0 ? DEFAULT_ANTI_SNIPE_WINDOW_SECONDS : antiSnipeWindowSeconds;
     }
 }

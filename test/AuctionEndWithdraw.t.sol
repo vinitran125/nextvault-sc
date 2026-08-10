@@ -25,6 +25,7 @@ contract AuctionEndWithdrawTest is Test {
     address private stranger = makeAddr("stranger");
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
+    bytes32 private constant LOT_ID_2 = bytes32(uint256(2));
     bytes32 private constant UNKNOWN_LOT_ID = bytes32(uint256(999));
     uint256 private constant USDC = 1e6;
     uint256 private constant STARTING_BID = 10_000 * USDC;
@@ -46,6 +47,9 @@ contract AuctionEndWithdrawTest is Test {
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
+    );
+    event AuctionTimingUpdated(
+        bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
     event AuctionRestarted(
         bytes32 indexed lotId,
@@ -153,6 +157,65 @@ contract AuctionEndWithdrawTest is Test {
         vm.expectRevert(Auction.InvalidAuctionTimingConfig.selector);
         auction.setAuctionTimingConfig(30 minutes, 0);
         vm.stopPrank();
+    }
+
+    function testOperatorCanUpdateTimingForAuctionBeforeItStarts() external {
+        _createAuction(1 days);
+        _createAuctionFor(LOT_ID_2, 1 days, STARTING_BID);
+
+        vm.prank(operator);
+        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+
+        bytes32[] memory lotIds = new bytes32[](2);
+        lotIds[0] = LOT_ID;
+        lotIds[1] = LOT_ID_2;
+
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit AuctionTimingUpdated(LOT_ID, 30 minutes, 2 minutes, block.timestamp);
+        vm.prank(operator);
+        auction.updateAuctionTimingConfigs(lotIds);
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(config.paymentGracePeriodSeconds, 30 minutes);
+        assertEq(config.antiSnipeWindowSeconds, 2 minutes);
+
+        config = auction.getAuction(LOT_ID_2);
+        assertEq(config.paymentGracePeriodSeconds, 30 minutes);
+        assertEq(config.antiSnipeWindowSeconds, 2 minutes);
+    }
+
+    function testAuctionTimingUpdateRejectsUnauthorizedEmptyAndStartedAuction() external {
+        Auction.AuctionConfig memory config = _createAuction(1 days);
+        bytes32[] memory lotIds = new bytes32[](1);
+        lotIds[0] = LOT_ID;
+
+        vm.prank(stranger);
+        vm.expectRevert();
+        auction.updateAuctionTimingConfigs(lotIds);
+
+        bytes32[] memory emptyLotIds = new bytes32[](0);
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidAmount.selector);
+        auction.updateAuctionTimingConfigs(emptyLotIds);
+
+        bytes32[] memory oversizedLotIds = new bytes32[](11);
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidAmount.selector);
+        auction.updateAuctionTimingConfigs(oversizedLotIds);
+
+        vm.warp(config.startTime);
+        vm.prank(operator);
+        vm.expectRevert(Auction.AuctionDetailsLocked.selector);
+        auction.updateAuctionTimingConfigs(lotIds);
+    }
+
+    function testAuctionTimingUpdateRejectsUnknownAuction() external {
+        bytes32[] memory lotIds = new bytes32[](1);
+        lotIds[0] = LOT_ID;
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.AuctionNotFound.selector);
+        auction.updateAuctionTimingConfigs(lotIds);
     }
 
     function testEndAuctionWithWinnerStartsPaymentPendingWhenAllowanceIsMissing() external {
@@ -1083,8 +1146,15 @@ contract AuctionEndWithdrawTest is Test {
         private
         returns (Auction.AuctionConfig memory)
     {
+        return _createAuctionFor(LOT_ID, previewDuration, startingBid);
+    }
+
+    function _createAuctionFor(bytes32 lotId, uint256 previewDuration, uint256 startingBid)
+        private
+        returns (Auction.AuctionConfig memory)
+    {
         Auction.CreateAuctionParams memory params = Auction.CreateAuctionParams({
-            lotId: LOT_ID,
+            lotId: lotId,
             consignor: consignor,
             lowEstimate: startingBid,
             highEstimate: 20_000 * USDC,
@@ -1100,10 +1170,10 @@ contract AuctionEndWithdrawTest is Test {
             thumbnailUrl: "ipfs://thumbnail",
             metadataUri: "ipfs://metadata/"
         });
-        bytes32 nonce = keccak256(abi.encode("lifecycle"));
+        bytes32 nonce = keccak256(abi.encode("lifecycle", lotId));
         uint256 deadline = block.timestamp + 1 hours;
         auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline));
-        return auction.getAuction(LOT_ID);
+        return auction.getAuction(lotId);
     }
 
     function _buyNft(address bidder) private {
