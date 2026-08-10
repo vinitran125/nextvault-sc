@@ -2,6 +2,8 @@
 pragma solidity ^0.8.13;
 
 interface INFTDesignManager {
+    function auction() external view returns (address);
+
     function createLotNFT(
         string calldata name,
         string calldata symbol,

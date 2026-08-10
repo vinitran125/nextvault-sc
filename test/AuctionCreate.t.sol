@@ -45,6 +45,9 @@ contract AuctionCreateTest is Test {
         uint8 variant,
         uint256 blockTimestamp
     );
+    event NFTDesignManagerUpdated(
+        address indexed previousDesignManager, address indexed newDesignManager, uint256 blockTimestamp
+    );
 
     function setUp() external {
         token = new FakeUSDC();
@@ -138,6 +141,70 @@ contract AuctionCreateTest is Test {
         lotNFTImplementation.initialize(
             "Implementation", "IMPL", "", LOT_ID, 1, 1, 0, 0, address(auction), address(designManager)
         );
+    }
+
+    function testAdminCanReplaceDesignManagerWithoutBreakingExistingCollections() external {
+        Auction.CreateAuctionParams memory oldParams = _defaultParams();
+        oldParams.previewDurationSeconds = 0;
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(
+            oldParams,
+            _nonce("old-manager-auction"),
+            deadline,
+            _sign(oldParams, _nonce("old-manager-auction"), deadline, adminKey)
+        );
+        Auction.AuctionConfig memory oldAuction = auction.getAuction(LOT_ID);
+
+        LotNFT newImplementation = new LotNFT();
+        NFTDesignManager newManager = new NFTDesignManager(
+            admin, address(newImplementation), address(vrf), 1, bytes32(uint256(1)), 500_000, 3, false
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(Auction.InvalidDesignManager.selector);
+        auction.setNFTDesignManager(address(newManager));
+
+        vm.prank(admin);
+        newManager.initializeAuction(address(auction));
+
+        vm.prank(buyer);
+        vm.expectRevert();
+        auction.setNFTDesignManager(address(newManager));
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit NFTDesignManagerUpdated(address(designManager), address(newManager), block.timestamp);
+        vm.prank(admin);
+        auction.setNFTDesignManager(address(newManager));
+
+        assertEq(auction.nftDesignManager(), address(newManager));
+
+        token.mint(buyer, oldAuction.nftPrice);
+        vm.startPrank(buyer);
+        token.approve(address(auction), oldAuction.nftPrice);
+        auction.buyNFT(LOT_ID, 1);
+        vm.stopPrank();
+
+        NFTDesignManager.VariantRequest memory oldRequest = designManager.getVariantRequest(1);
+        assertEq(oldRequest.nftCollection, oldAuction.nftCollection);
+
+        bytes32 newLotId = bytes32(uint256(2));
+        Auction.CreateAuctionParams memory newParams = _defaultParams();
+        newParams.lotId = newLotId;
+        newParams.previewDurationSeconds = 0;
+        bytes32 newNonce = _nonce("new-manager-auction");
+        auction.createAuction(newParams, newNonce, deadline, _sign(newParams, newNonce, deadline, adminKey));
+
+        Auction.AuctionConfig memory newAuction = auction.getAuction(newLotId);
+        assertEq(LotNFT(newAuction.nftCollection).designManager(), address(newManager));
+
+        token.mint(buyer, newAuction.nftPrice);
+        vm.startPrank(buyer);
+        token.approve(address(auction), newAuction.nftPrice);
+        auction.buyNFT(newLotId, 1);
+        vm.stopPrank();
+
+        NFTDesignManager.VariantRequest memory newRequest = newManager.getVariantRequest(2);
+        assertEq(newRequest.nftCollection, newAuction.nftCollection);
     }
 
     function testCreateAuctionWithZeroPreviewStartsImmediately() external {
@@ -514,6 +581,36 @@ contract AuctionCreateTest is Test {
         LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
         assertEq(nft.maxSupply(), 1);
         assertEq(nft.initialMintLimit(), 1);
+    }
+
+    function testCreateAuctionRoundsMintLimitUpToFivePercent() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.variant1Quantity = 21;
+        params.variant2Quantity = 0;
+        params.variant3Quantity = 0;
+        bytes32 nonce = _nonce("rounded-mint-limit");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
+        assertEq(nft.maxSupply(), 21);
+        assertEq(nft.initialMintLimit(), 2);
+    }
+
+    function testCreateAuctionRoundsMintLimitUpAcrossLargerBoundary() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.variant1Quantity = 101;
+        params.variant2Quantity = 0;
+        params.variant3Quantity = 0;
+        bytes32 nonce = _nonce("larger-rounded-mint-limit");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        LotNFT nft = LotNFT(auction.getAuction(LOT_ID).nftCollection);
+        assertEq(nft.maxSupply(), 101);
+        assertEq(nft.initialMintLimit(), 6);
     }
 
     function _createDefaultAuction() private {
