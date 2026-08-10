@@ -173,6 +173,81 @@ contract AuctionMaxBidTest is Test {
         auction.setMaxBid(LOT_ID, 15_000 * USDC);
     }
 
+    function testSetMaxBidRejectsCompetitorBelowHighestMaxBidWithoutTakingDeposit() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _buyNft(bidderB, 1);
+        _setMaxBid(bidderA, 15_000 * USDC);
+
+        uint256 bidderBalanceBefore = token.balanceOf(bidderB);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+        _approveBidDeposit(bidderB, 12_000 * USDC);
+
+        vm.prank(bidderB);
+        vm.expectRevert(Auction.InvalidBidAmount.selector);
+        auction.setMaxBid(LOT_ID, 12_000 * USDC);
+
+        assertEq(token.balanceOf(bidderB), bidderBalanceBefore);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore);
+    }
+
+    function testSetMaxBidRejectsCompetitorEqualToHighestMaxBidWithoutTakingDeposit() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _buyNft(bidderB, 1);
+        _setMaxBid(bidderA, 15_000 * USDC);
+
+        uint256 bidderBalanceBefore = token.balanceOf(bidderB);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+        _approveBidDeposit(bidderB, 15_000 * USDC);
+
+        vm.prank(bidderB);
+        vm.expectRevert(Auction.InvalidBidAmount.selector);
+        auction.setMaxBid(LOT_ID, 15_000 * USDC);
+
+        assertEq(token.balanceOf(bidderB), bidderBalanceBefore);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore);
+    }
+
+    function testSetMaxBidAllowsCompetitorAboveHighestMaxBid() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _buyNft(bidderB, 1);
+        _setMaxBid(bidderA, 15_000 * USDC);
+
+        _setMaxBid(bidderB, 16_000 * USDC);
+
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE * 2 + 15_000 * USDC / 10 + 16_000 * USDC / 10);
+    }
+
+    function testRestartBlacklistCaseRejectsSevenHundredAgainstEightHundredMaxBid() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.lowEstimate = 500 * USDC;
+        params.highEstimate = 1_000 * USDC;
+        params.startingBid = 500 * USDC;
+        params.previewDurationSeconds = 0;
+        _createAuction(params, "restart-blacklist-max-bid");
+        _buyNft(bidderA, 1);
+        _buyNft(bidderB, 1);
+
+        _setMaxBid(bidderA, 800 * USDC);
+        vm.prank(operator);
+        auction.placeBidFor(LOT_ID, bidderA, 500 * USDC);
+        vm.prank(operator);
+        auction.setWalletBlacklist(bidderA, true);
+
+        uint256 bidderBBalanceBefore = token.balanceOf(bidderB);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+        _approveBidDeposit(bidderB, 700 * USDC);
+
+        vm.prank(bidderB);
+        vm.expectRevert(Auction.InvalidBidAmount.selector);
+        auction.setMaxBid(LOT_ID, 700 * USDC);
+
+        assertEq(token.balanceOf(bidderB), bidderBBalanceBefore);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore);
+    }
+
     function testPlaceBidForAllowsOperatorToBidForRegisteredMaxBidder() external {
         _createActiveAuction();
         _buyNft(bidderA, 1);
