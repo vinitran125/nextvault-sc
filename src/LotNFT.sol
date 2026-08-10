@@ -164,8 +164,7 @@ contract LotNFT is Initializable, ERC721Upgradeable {
     /// @notice Returns the maximum number of NFTs one wallet can mint during initial sale.
     /// @dev The cap is 5% of maxSupply, with a minimum of 1 NFT for small supplies.
     function initialMintLimit() public view returns (uint256) {
-        uint256 cap = maxSupply / 20;
-        return cap == 0 ? 1 : cap;
+        return (maxSupply + 19) / 20;
     }
 
     /// @dev Reverts if `to` would exceed the cumulative initial mint cap.

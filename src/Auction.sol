@@ -163,6 +163,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     event AuctionTimingUpdated(
         bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
+    event NFTDesignManagerUpdated(
+        address indexed previousDesignManager, address indexed newDesignManager, uint256 blockTimestamp
+    );
     event AuctionSettled(
         bytes32 indexed lotId,
         address indexed winner,
@@ -321,6 +324,16 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit AuctionTimingConfigUpdated(paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
     }
 
+    function setNFTDesignManager(address designManager) external onlyRole(OPERATOR_ROLE) {
+        if (designManager == address(0) || INFTDesignManager(designManager).auction() != address(this)) {
+            revert InvalidDesignManager();
+        }
+
+        address previousDesignManager = nftDesignManager;
+        nftDesignManager = designManager;
+        emit NFTDesignManagerUpdated(previousDesignManager, designManager, block.timestamp);
+    }
+
     function updateAuctionTimingConfigs(bytes32[] calldata lotIds) external onlyRole(OPERATOR_ROLE) {
         if (lotIds.length == 0 || lotIds.length > MAX_AUCTION_TIMING_UPDATE_BATCH_SIZE) revert InvalidAmount();
 
@@ -471,7 +484,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         uint256 lastTokenId = LotNFT(auction.nftCollection).mintBatch(msg.sender, quantity);
         uint256 firstTokenId = lastTokenId - quantity + 1;
-        INFTDesignManager(nftDesignManager)
+        INFTDesignManager(LotNFT(auction.nftCollection).designManager())
             .requestVariants(lotId, msg.sender, auction.nftCollection, firstTokenId, quantity);
 
         emit NFTPurchased(lotId, msg.sender, quantity, totalPrice, lastTokenId, block.timestamp);
@@ -653,7 +666,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         token.safeTransfer(auction.consignor, consignorProceeds);
         token.safeTransfer(treasury, platformRevenue);
 
-        INFTDesignManager(nftDesignManager).mintWinnerVariant(lotId, auction.nftCollection, winner);
+        INFTDesignManager(LotNFT(auction.nftCollection).designManager())
+            .mintWinnerVariant(lotId, auction.nftCollection, winner);
 
         emit AuctionSettled(
             lotId,
