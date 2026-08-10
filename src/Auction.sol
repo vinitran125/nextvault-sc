@@ -488,6 +488,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         uint256 previousMaxBid = itemBidderToMaxBid[lotId][msg.sender];
         if (amount <= previousMaxBid) revert InvalidBidAmount();
+        if (
+            itemToMaxBidder[lotId] != address(0) && itemToMaxBidder[lotId] != msg.sender
+                && amount <= itemToMaxBid[lotId]
+        ) {
+            revert InvalidBidAmount();
+        }
 
         uint256 requiredDeposit = amount / 10;
         uint256 previousDeposit = previousMaxBid / 10;

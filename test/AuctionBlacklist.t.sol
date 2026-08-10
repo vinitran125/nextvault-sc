@@ -139,6 +139,30 @@ contract AuctionBlacklistTest is Test {
         assertEq(winningBid, STARTING_BID);
     }
 
+    function testBlacklistedWalletExistingMaxBidStillBlocksLowerCompetitorMaxBid() external {
+        _createActiveAuction();
+        _buyNft();
+
+        address competitor = makeAddr("competitor");
+        token.mint(competitor, STARTING_BALANCE);
+        _buyNftFor(competitor);
+
+        vm.prank(bidder);
+        token.approve(address(auction), 15_000 * USDC / 10);
+        vm.prank(bidder);
+        auction.setMaxBid(LOT_ID, 15_000 * USDC);
+        _blacklist(bidder);
+
+        uint256 competitorBalanceBefore = token.balanceOf(competitor);
+        vm.prank(competitor);
+        token.approve(address(auction), 12_000 * USDC / 10);
+        vm.prank(competitor);
+        vm.expectRevert(Auction.InvalidBidAmount.selector);
+        auction.setMaxBid(LOT_ID, 12_000 * USDC);
+
+        assertEq(token.balanceOf(competitor), competitorBalanceBefore);
+    }
+
     function testBlacklistedWinnerCanStillCompleteExistingSettlement() external {
         _createActiveAuction();
         _buyNft();
@@ -210,6 +234,13 @@ contract AuctionBlacklistTest is Test {
         vm.prank(bidder);
         token.approve(address(auction), NFT_PRICE);
         vm.prank(bidder);
+        auction.buyNFT(LOT_ID, 1);
+    }
+
+    function _buyNftFor(address buyer) private {
+        vm.prank(buyer);
+        token.approve(address(auction), NFT_PRICE);
+        vm.prank(buyer);
         auction.buyNFT(LOT_ID, 1);
     }
 
