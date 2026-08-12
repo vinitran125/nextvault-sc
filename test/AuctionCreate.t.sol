@@ -18,9 +18,10 @@ contract AuctionCreateTest is Test {
     LotNFT private lotNFTImplementation;
 
     uint256 private adminKey = 0xA11CE;
+    uint256 private operatorKey = 0x0B0B0B;
     uint256 private nonAdminKey = 0xB0B;
     address private admin = vm.addr(adminKey);
-    address private operator = makeAddr("operator");
+    address private operator = vm.addr(operatorKey);
     address private consignor = makeAddr("consignor");
     address private buyer = makeAddr("buyer");
 
@@ -126,6 +127,18 @@ contract AuctionCreateTest is Test {
         assertEq(config.nftCollection.code.length, 45);
         assertNotEq(config.nftCollection, address(lotNFTImplementation));
         assertEq(designManager.lotNFTImplementation(), address(lotNFTImplementation));
+    }
+
+    function testOperatorCanAuthorizeCreateAuctionForRelayer() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        bytes32 nonce = _nonce("operator-signer");
+        uint256 deadline = block.timestamp + 1 hours;
+
+        vm.prank(buyer);
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, operatorKey));
+
+        assertTrue(auction.auctionExists(LOT_ID));
+        assertTrue(auction.usedNonces(nonce));
     }
 
     function testDesignManagerIsFixedDuringInitialization() external {
@@ -454,7 +467,7 @@ contract AuctionCreateTest is Test {
         auction.createAuction(params, nonce, deadline, signature);
     }
 
-    function testCreateAuctionRevertsWhenSignerIsNotAdmin() external {
+    function testCreateAuctionRevertsWhenSignerIsNotOperator() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         bytes32 nonce = _nonce("bad-signer");
         uint256 deadline = block.timestamp + 1 hours;

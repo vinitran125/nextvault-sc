@@ -22,7 +22,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public constant DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT = 20;
     uint256 public constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
     uint256 public constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
-    uint256 private constant MAX_AUCTION_TIMING_UPDATE_BATCH_SIZE = 10;
+    uint256 private constant MAX_AUCTION_CONFIG_UPDATE_BATCH_SIZE = 10;
     string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
     string internal constant NFT_COLLECTION_SYMBOL = "NV";
     bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
@@ -30,6 +30,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     );
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint256 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
+    );
+    bytes32 public constant SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
+        "SettlementConfigAuthorization(address treasury,uint256 applicationDepositAmount,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
+    );
+    bytes32 public constant AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
+        "AuctionTimingConfigAuthorization(uint256 paymentGracePeriodSeconds,uint256 antiSnipeWindowSeconds,bytes32 nonce,uint256 deadline)"
     );
 
     enum AuctionStatus {
@@ -99,6 +105,22 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 deadline;
     }
 
+    struct SettlementConfigAuthorization {
+        address treasury;
+        uint256 applicationDepositAmount;
+        uint16 buyerPremiumBps;
+        uint16 sellerCommissionBps;
+        bytes32 nonce;
+        uint256 deadline;
+    }
+
+    struct AuctionTimingConfigAuthorization {
+        uint256 paymentGracePeriodSeconds;
+        uint256 antiSnipeWindowSeconds;
+        bytes32 nonce;
+        uint256 deadline;
+    }
+
     error InvalidToken();
     error InvalidLotId();
     error LotAlreadyRegistered();
@@ -133,7 +155,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidItemDepositStatus();
     error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
-    error InvalidFinancialConfig();
     error InvalidAuctionTimingConfig();
     error AuctionPaymentGracePeriodActive(uint256 deadline);
     error AuctionDetailsLocked();
@@ -157,16 +178,20 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
     );
     event SettlementConfigUpdated(
-        address indexed treasury, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
-    );
-    event FinancialConfigUpdated(
-        uint256 applicationDepositAmount, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
+        address indexed treasury,
+        uint256 applicationDepositAmount,
+        uint16 buyerPremiumBps,
+        uint16 sellerCommissionBps,
+        uint256 blockTimestamp
     );
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
     event AuctionTimingUpdated(
         bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
+    );
+    event AuctionSettlementConfigUpdated(
+        bytes32 indexed lotId, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
     );
     event NFTDesignManagerUpdated(
         address indexed previousDesignManager, address indexed newDesignManager, uint256 blockTimestamp
@@ -304,47 +329,50 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         // Upgrade authorization is handled by AccessControl.
     }
 
-    function setSettlementConfig(address treasury_, uint16 buyerPremiumBps_, uint16 sellerCommissionBps_)
+    function setSettlementConfig(SettlementConfigAuthorization calldata authorization, bytes calldata signature)
         external
-        onlyRole(DEFAULT_ADMIN_ROLE)
     {
-        if (treasury_ == address(0) || buyerPremiumBps_ > BPS_DENOMINATOR || sellerCommissionBps_ > BPS_DENOMINATOR) revert InvalidSettlementConfig();
+        if (
+            authorization.treasury == address(0) || authorization.applicationDepositAmount == 0
+                || authorization.buyerPremiumBps > BPS_DENOMINATOR
+                || authorization.sellerCommissionBps > BPS_DENOMINATOR
+        ) revert InvalidSettlementConfig();
 
-        treasury = treasury_;
-        buyerPremiumBps = buyerPremiumBps_;
-        sellerCommissionBps = sellerCommissionBps_;
+        _validateOperatorAuthorization(
+            _hashSettlementConfigAuthorization(authorization), authorization.nonce, authorization.deadline, signature
+        );
 
-        emit SettlementConfigUpdated(treasury_, buyerPremiumBps_, sellerCommissionBps_, block.timestamp);
+        treasury = authorization.treasury;
+        applicationDepositAmount = authorization.applicationDepositAmount;
+        buyerPremiumBps = authorization.buyerPremiumBps;
+        sellerCommissionBps = authorization.sellerCommissionBps;
+
+        emit SettlementConfigUpdated(
+            authorization.treasury,
+            authorization.applicationDepositAmount,
+            authorization.buyerPremiumBps,
+            authorization.sellerCommissionBps,
+            block.timestamp
+        );
     }
 
-    function setAuctionTimingConfig(uint256 paymentGracePeriodSeconds_, uint256 antiSnipeWindowSeconds_)
+    function setAuctionTimingConfig(AuctionTimingConfigAuthorization calldata authorization, bytes calldata signature)
         external
-        onlyRole(OPERATOR_ROLE)
     {
-        if (paymentGracePeriodSeconds_ == 0 || antiSnipeWindowSeconds_ == 0) {
+        if (authorization.paymentGracePeriodSeconds == 0 || authorization.antiSnipeWindowSeconds == 0) {
             revert InvalidAuctionTimingConfig();
         }
 
-        paymentGracePeriodSeconds = paymentGracePeriodSeconds_;
-        antiSnipeWindowSeconds = antiSnipeWindowSeconds_;
+        _validateOperatorAuthorization(
+            _hashAuctionTimingConfigAuthorization(authorization), authorization.nonce, authorization.deadline, signature
+        );
 
-        emit AuctionTimingConfigUpdated(paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
-    }
+        paymentGracePeriodSeconds = authorization.paymentGracePeriodSeconds;
+        antiSnipeWindowSeconds = authorization.antiSnipeWindowSeconds;
 
-    function setFinancialConfig(uint256 applicationDepositAmount_, uint16 buyerPremiumBps_, uint16 sellerCommissionBps_)
-        external
-        onlyRole(OPERATOR_ROLE)
-    {
-        if (
-            applicationDepositAmount_ == 0 || buyerPremiumBps_ > BPS_DENOMINATOR
-                || sellerCommissionBps_ > BPS_DENOMINATOR
-        ) revert InvalidFinancialConfig();
-
-        applicationDepositAmount = applicationDepositAmount_;
-        buyerPremiumBps = buyerPremiumBps_;
-        sellerCommissionBps = sellerCommissionBps_;
-
-        emit FinancialConfigUpdated(applicationDepositAmount_, buyerPremiumBps_, sellerCommissionBps_, block.timestamp);
+        emit AuctionTimingConfigUpdated(
+            authorization.paymentGracePeriodSeconds, authorization.antiSnipeWindowSeconds, block.timestamp
+        );
     }
 
     function setNFTDesignManager(address designManager) external onlyRole(OPERATOR_ROLE) {
@@ -358,7 +386,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function updateAuctionTimingConfigs(bytes32[] calldata lotIds) external onlyRole(OPERATOR_ROLE) {
-        if (lotIds.length == 0 || lotIds.length > MAX_AUCTION_TIMING_UPDATE_BATCH_SIZE) revert InvalidAmount();
+        if (lotIds.length == 0 || lotIds.length > MAX_AUCTION_CONFIG_UPDATE_BATCH_SIZE) revert InvalidAmount();
 
         uint256 paymentGracePeriodSeconds_ = paymentGracePeriodSeconds;
         uint256 antiSnipeWindowSeconds_ = antiSnipeWindowSeconds;
@@ -374,6 +402,26 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             auction.antiSnipeWindowSeconds = antiSnipeWindowSeconds_;
 
             emit AuctionTimingUpdated(lotId, paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
+        }
+    }
+
+    function updateAuctionSettlementConfigs(bytes32[] calldata lotIds) external onlyRole(OPERATOR_ROLE) {
+        if (lotIds.length == 0 || lotIds.length > MAX_AUCTION_CONFIG_UPDATE_BATCH_SIZE) revert InvalidAmount();
+
+        uint16 buyerPremiumBps_ = buyerPremiumBps;
+        uint16 sellerCommissionBps_ = sellerCommissionBps;
+
+        for (uint256 i; i < lotIds.length; ++i) {
+            bytes32 lotId = lotIds[i];
+            if (!auctionExists[lotId]) revert AuctionNotFound();
+
+            AuctionConfig storage auction = auctions[lotId];
+            if (block.timestamp >= auction.startTime) revert AuctionDetailsLocked();
+
+            auction.buyerPremiumBps = buyerPremiumBps_;
+            auction.sellerCommissionBps = sellerCommissionBps_;
+
+            emit AuctionSettlementConfigUpdated(lotId, buyerPremiumBps_, sellerCommissionBps_, block.timestamp);
         }
     }
 
@@ -394,13 +442,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 deadline,
         bytes calldata signature
     ) external returns (bytes32) {
-        if (block.timestamp > deadline) revert AuthorizationExpired();
-        if (usedNonces[nonce]) revert NonceAlreadyUsed();
-
-        address signer = ECDSA.recover(_hashCreateAuctionAuthorization(params, nonce, deadline), signature);
-        if (!hasRole(DEFAULT_ADMIN_ROLE, signer)) revert InvalidSigner();
-
-        usedNonces[nonce] = true;
+        _validateOperatorAuthorization(
+            _hashCreateAuctionAuthorization(params, nonce, deadline), nonce, deadline, signature
+        );
 
         if (params.lotId == bytes32(0)) revert InvalidLotId();
         if (auctionExists[params.lotId]) revert LotAlreadyRegistered();
@@ -841,18 +885,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         external
     {
         if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
-        if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
         if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
         if (authorization.amount != applicationDepositAmount) revert InvalidAmount();
-        if (usedNonces[authorization.nonce]) revert NonceAlreadyUsed();
         if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.None) {
             revert ConsignmentDepositAlreadyExists();
         }
 
-        address signer = ECDSA.recover(_hashConsignmentDepositAuthorization(authorization), signature);
-        if (!hasRole(DEFAULT_ADMIN_ROLE, signer)) revert InvalidSigner();
-
-        usedNonces[authorization.nonce] = true;
+        _validateOperatorAuthorization(
+            _hashConsignmentDepositAuthorization(authorization), authorization.nonce, authorization.deadline, signature
+        );
         itemDepositAmount[authorization.itemId] = authorization.amount;
         itemDepositConsignor[authorization.itemId] = msg.sender;
         itemDepositStatus[authorization.itemId] = ItemDepositStatus.Deposited;
@@ -954,6 +995,54 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         );
 
         return _hashTypedDataV4(structHash);
+    }
+
+    function _hashSettlementConfigAuthorization(SettlementConfigAuthorization calldata authorization)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH,
+                authorization.treasury,
+                authorization.applicationDepositAmount,
+                authorization.buyerPremiumBps,
+                authorization.sellerCommissionBps,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
+    function _hashAuctionTimingConfigAuthorization(AuctionTimingConfigAuthorization calldata authorization)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH,
+                authorization.paymentGracePeriodSeconds,
+                authorization.antiSnipeWindowSeconds,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
+    function _validateOperatorAuthorization(bytes32 digest, bytes32 nonce, uint256 deadline, bytes calldata signature)
+        internal
+    {
+        if (block.timestamp > deadline) revert AuthorizationExpired();
+        if (usedNonces[nonce]) revert NonceAlreadyUsed();
+        if (!hasRole(OPERATOR_ROLE, ECDSA.recover(digest, signature))) revert InvalidSigner();
+
+        usedNonces[nonce] = true;
     }
 
     function _currentStatus(uint256 startTime, uint256 previewDurationSeconds, uint256 endTime)
