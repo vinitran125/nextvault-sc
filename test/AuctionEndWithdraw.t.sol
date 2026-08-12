@@ -48,6 +48,9 @@ contract AuctionEndWithdrawTest is Test {
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
+    event FinancialConfigUpdated(
+        uint256 applicationDepositAmount, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
+    );
     event AuctionTimingUpdated(
         bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
@@ -114,6 +117,40 @@ contract AuctionEndWithdrawTest is Test {
 
         assertEq(auction.paymentGracePeriodSeconds(), 30 minutes);
         assertEq(auction.antiSnipeWindowSeconds(), 2 minutes);
+    }
+
+    function testFinancialConfigUsesDefaultsAndCanBeUpdatedByOperator() external {
+        assertEq(auction.applicationDepositAmount(), 20 * USDC);
+        assertEq(auction.buyerPremiumBps(), 1_000);
+        assertEq(auction.sellerCommissionBps(), 1_000);
+
+        vm.expectEmit(false, false, false, true, address(auction));
+        emit FinancialConfigUpdated(50 * USDC, 1_500, 750, block.timestamp);
+        vm.prank(operator);
+        auction.setFinancialConfig(50 * USDC, 1_500, 750);
+
+        assertEq(auction.applicationDepositAmount(), 50 * USDC);
+        assertEq(auction.buyerPremiumBps(), 1_500);
+        assertEq(auction.sellerCommissionBps(), 750);
+
+        Auction.AuctionConfig memory config = _createAuction(0);
+        assertEq(config.buyerPremiumBps, 1_500);
+        assertEq(config.sellerCommissionBps, 750);
+    }
+
+    function testFinancialConfigRejectsUnauthorizedCallerAndInvalidValues() external {
+        vm.prank(stranger);
+        vm.expectRevert();
+        auction.setFinancialConfig(50 * USDC, 1_500, 750);
+
+        vm.startPrank(operator);
+        vm.expectRevert(Auction.InvalidFinancialConfig.selector);
+        auction.setFinancialConfig(0, 1_500, 750);
+        vm.expectRevert(Auction.InvalidFinancialConfig.selector);
+        auction.setFinancialConfig(50 * USDC, 10_001, 750);
+        vm.expectRevert(Auction.InvalidFinancialConfig.selector);
+        auction.setFinancialConfig(50 * USDC, 1_500, 10_001);
+        vm.stopPrank();
     }
 
     function testAuctionTermsAreSnapshottedAtCreation() external {

@@ -19,6 +19,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant DEFAULT_BUYER_PREMIUM_BPS = 1_000;
     uint16 public constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
+    uint256 public constant DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT = 20;
     uint256 public constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
     uint256 public constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
     uint256 private constant MAX_AUCTION_TIMING_UPDATE_BATCH_SIZE = 10;
@@ -132,6 +133,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidItemDepositStatus();
     error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
+    error InvalidFinancialConfig();
     error InvalidAuctionTimingConfig();
     error AuctionPaymentGracePeriodActive(uint256 deadline);
     error AuctionDetailsLocked();
@@ -156,6 +158,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     );
     event SettlementConfigUpdated(
         address indexed treasury, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
+    );
+    event FinancialConfigUpdated(
+        uint256 applicationDepositAmount, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
     );
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
@@ -267,6 +272,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public paymentGracePeriodSeconds;
     uint256 public antiSnipeWindowSeconds;
     mapping(bytes32 => uint256) public auctionPaymentDeadline;
+    uint256 public applicationDepositAmount;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -289,6 +295,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         treasury = admin;
         buyerPremiumBps = DEFAULT_BUYER_PREMIUM_BPS;
         sellerCommissionBps = DEFAULT_SELLER_COMMISSION_BPS;
+        applicationDepositAmount = DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT * tokenDecimal;
         paymentGracePeriodSeconds = DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS;
         antiSnipeWindowSeconds = DEFAULT_ANTI_SNIPE_WINDOW_SECONDS;
     }
@@ -322,6 +329,22 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         antiSnipeWindowSeconds = antiSnipeWindowSeconds_;
 
         emit AuctionTimingConfigUpdated(paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, block.timestamp);
+    }
+
+    function setFinancialConfig(uint256 applicationDepositAmount_, uint16 buyerPremiumBps_, uint16 sellerCommissionBps_)
+        external
+        onlyRole(OPERATOR_ROLE)
+    {
+        if (
+            applicationDepositAmount_ == 0 || buyerPremiumBps_ > BPS_DENOMINATOR
+                || sellerCommissionBps_ > BPS_DENOMINATOR
+        ) revert InvalidFinancialConfig();
+
+        applicationDepositAmount = applicationDepositAmount_;
+        buyerPremiumBps = buyerPremiumBps_;
+        sellerCommissionBps = sellerCommissionBps_;
+
+        emit FinancialConfigUpdated(applicationDepositAmount_, buyerPremiumBps_, sellerCommissionBps_, block.timestamp);
     }
 
     function setNFTDesignManager(address designManager) external onlyRole(OPERATOR_ROLE) {
@@ -450,6 +473,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (lowEstimate == 0 || highEstimate < lowEstimate) revert InvalidEstimate();
 
         AuctionConfig storage auction = auctions[lotId];
+        if (auction.startingBid > lowEstimate) revert InvalidStartingBid();
+
         AuctionStatus status = _currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime);
         if (
             cancelledAuctions[lotId] || endedAuctions[lotId] || auctionPaymentCollected[lotId]
@@ -818,7 +843,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
         if (block.timestamp > authorization.deadline) revert AuthorizationExpired();
         if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
-        if (authorization.amount == 0) revert InvalidAmount();
+        if (authorization.amount != applicationDepositAmount) revert InvalidAmount();
         if (usedNonces[authorization.nonce]) revert NonceAlreadyUsed();
         if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.None) {
             revert ConsignmentDepositAlreadyExists();

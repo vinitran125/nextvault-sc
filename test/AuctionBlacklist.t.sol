@@ -119,6 +119,31 @@ contract AuctionBlacklistTest is Test {
         auction.depositConsignment(authorization, signature);
     }
 
+    function testConsignmentDepositMustMatchConfiguredApplicationDeposit() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
+        authorization.amount += USDC;
+        bytes memory signature = _signDepositAuthorization(authorization);
+
+        vm.prank(bidder);
+        token.approve(address(auction), authorization.amount);
+        vm.prank(bidder);
+        vm.expectRevert(Auction.InvalidAmount.selector);
+        auction.depositConsignment(authorization, signature);
+
+        vm.prank(operator);
+        auction.setFinancialConfig(50 * USDC, 1_000, 1_000);
+
+        authorization.amount = 50 * USDC;
+        authorization.nonce = keccak256("configured-deposit");
+        signature = _signDepositAuthorization(authorization);
+        vm.prank(bidder);
+        token.approve(address(auction), authorization.amount);
+        vm.prank(bidder);
+        auction.depositConsignment(authorization, signature);
+
+        assertEq(token.balanceOf(address(auction)), 50 * USDC);
+    }
+
     function testExistingMaxBidContinuesAfterWalletIsBlacklisted() external {
         _createActiveAuction();
         _buyNft();
@@ -252,7 +277,7 @@ contract AuctionBlacklistTest is Test {
         authorization = Auction.ConsignmentDepositAuthorization({
             itemId: ITEM_ID,
             consignor: bidder,
-            amount: 100 * USDC,
+            amount: auction.applicationDepositAmount(),
             nonce: keccak256("deposit-consignment"),
             deadline: block.timestamp + 1 hours
         });
