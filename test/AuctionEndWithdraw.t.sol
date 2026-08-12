@@ -16,13 +16,15 @@ contract AuctionEndWithdrawTest is Test {
     NFTDesignManager private designManager;
 
     uint256 private adminKey = 0xA11CE;
+    uint256 private operatorKey = 0x0B0B;
+    uint256 private strangerKey = 0xBAD;
     address private admin = vm.addr(adminKey);
-    address private operator = makeAddr("operator");
+    address private operator = vm.addr(operatorKey);
     address private consignor = makeAddr("consignor");
     address private bidderA = makeAddr("bidderA");
     address private bidderB = makeAddr("bidderB");
     address private bidderC = makeAddr("bidderC");
-    address private stranger = makeAddr("stranger");
+    address private stranger = vm.addr(strangerKey);
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
     bytes32 private constant LOT_ID_2 = bytes32(uint256(2));
@@ -48,11 +50,18 @@ contract AuctionEndWithdrawTest is Test {
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
-    event FinancialConfigUpdated(
-        uint256 applicationDepositAmount, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
+    event SettlementConfigUpdated(
+        address indexed treasury,
+        uint256 applicationDepositAmount,
+        uint16 buyerPremiumBps,
+        uint16 sellerCommissionBps,
+        uint256 blockTimestamp
     );
     event AuctionTimingUpdated(
         bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
+    );
+    event AuctionSettlementConfigUpdated(
+        bytes32 indexed lotId, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
     );
     event AuctionRestarted(
         bytes32 indexed lotId,
@@ -112,22 +121,20 @@ contract AuctionEndWithdrawTest is Test {
 
         vm.expectEmit(false, false, false, true, address(auction));
         emit AuctionTimingConfigUpdated(30 minutes, 2 minutes, block.timestamp);
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+        _setAuctionTimingConfig(30 minutes, 2 minutes, keccak256("timing-config"), bidderA);
 
         assertEq(auction.paymentGracePeriodSeconds(), 30 minutes);
         assertEq(auction.antiSnipeWindowSeconds(), 2 minutes);
     }
 
-    function testFinancialConfigUsesDefaultsAndCanBeUpdatedByOperator() external {
+    function testSettlementConfigUsesDefaultsAndCanBeRelayedByWallet() external {
         assertEq(auction.applicationDepositAmount(), 20 * USDC);
         assertEq(auction.buyerPremiumBps(), 1_000);
         assertEq(auction.sellerCommissionBps(), 1_000);
 
-        vm.expectEmit(false, false, false, true, address(auction));
-        emit FinancialConfigUpdated(50 * USDC, 1_500, 750, block.timestamp);
-        vm.prank(operator);
-        auction.setFinancialConfig(50 * USDC, 1_500, 750);
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit SettlementConfigUpdated(admin, 50 * USDC, 1_500, 750, block.timestamp);
+        _setSettlementConfig(admin, 50 * USDC, 1_500, 750, keccak256("financial-config"), bidderA);
 
         assertEq(auction.applicationDepositAmount(), 50 * USDC);
         assertEq(auction.buyerPremiumBps(), 1_500);
@@ -138,28 +145,67 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(config.sellerCommissionBps, 750);
     }
 
-    function testFinancialConfigRejectsUnauthorizedCallerAndInvalidValues() external {
-        vm.prank(stranger);
-        vm.expectRevert();
-        auction.setFinancialConfig(50 * USDC, 1_500, 750);
+    function testSettlementConfigRejectsInvalidSigner() external {
+        Auction.SettlementConfigAuthorization memory authorization =
+            _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("invalid-signer"));
+        bytes memory signature = _signSettlementConfigAuthorization(authorization, strangerKey);
 
-        vm.startPrank(operator);
-        vm.expectRevert(Auction.InvalidFinancialConfig.selector);
-        auction.setFinancialConfig(0, 1_500, 750);
-        vm.expectRevert(Auction.InvalidFinancialConfig.selector);
-        auction.setFinancialConfig(50 * USDC, 10_001, 750);
-        vm.expectRevert(Auction.InvalidFinancialConfig.selector);
-        auction.setFinancialConfig(50 * USDC, 1_500, 10_001);
-        vm.stopPrank();
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.setSettlementConfig(authorization, signature);
+    }
+
+    function testSettlementConfigRejectsInvalidValues() external {
+        Auction.SettlementConfigAuthorization memory authorization =
+            _settlementConfigAuthorization(address(0), 50 * USDC, 1_500, 750, keccak256("zero-treasury"));
+        vm.expectRevert(Auction.InvalidSettlementConfig.selector);
+        auction.setSettlementConfig(authorization, "");
+
+        authorization = _settlementConfigAuthorization(admin, 0, 1_500, 750, keccak256("zero-deposit"));
+        vm.expectRevert(Auction.InvalidSettlementConfig.selector);
+        auction.setSettlementConfig(authorization, "");
+
+        authorization = _settlementConfigAuthorization(admin, 50 * USDC, 10_001, 750, keccak256("buyer-premium"));
+        vm.expectRevert(Auction.InvalidSettlementConfig.selector);
+        auction.setSettlementConfig(authorization, "");
+
+        authorization = _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 10_001, keccak256("seller-fee"));
+        vm.expectRevert(Auction.InvalidSettlementConfig.selector);
+        auction.setSettlementConfig(authorization, "");
+    }
+
+    function testSettlementConfigRejectsExpiredAndReplayedAuthorization() external {
+        Auction.SettlementConfigAuthorization memory authorization =
+            _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("expired-config"));
+        authorization.deadline = block.timestamp - 1;
+        bytes memory signature = _signSettlementConfigAuthorization(authorization, operatorKey);
+
+        vm.expectRevert(Auction.AuthorizationExpired.selector);
+        auction.setSettlementConfig(authorization, signature);
+
+        authorization = _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("replayed-config"));
+        signature = _signSettlementConfigAuthorization(authorization, operatorKey);
+        auction.setSettlementConfig(authorization, signature);
+
+        vm.expectRevert(Auction.NonceAlreadyUsed.selector);
+        auction.setSettlementConfig(authorization, signature);
+    }
+
+    function testSettlementConfigRejectsModifiedPayload() external {
+        Auction.SettlementConfigAuthorization memory authorization =
+            _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("modified-config"));
+        bytes memory signature = _signSettlementConfigAuthorization(authorization, operatorKey);
+        authorization.applicationDepositAmount = 60 * USDC;
+
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.setSettlementConfig(authorization, signature);
     }
 
     function testAuctionTermsAreSnapshottedAtCreation() external {
         Auction.AuctionConfig memory original = _createAuction(0);
 
-        vm.prank(admin);
-        auction.setSettlementConfig(admin, 2_000, 500);
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+        _setSettlementConfig(admin, 20 * USDC, 2_000, 500, keccak256("snapshot-existing"), bidderA);
+        _setAuctionTimingConfig(30 minutes, 2 minutes, keccak256("snapshot-existing-timing"), bidderA);
 
         Auction.AuctionConfig memory stored = auction.getAuction(LOT_ID);
         assertEq(stored.paymentGracePeriodSeconds, 1 hours);
@@ -171,10 +217,8 @@ contract AuctionEndWithdrawTest is Test {
     }
 
     function testNewAuctionSnapshotsLatestTimingAndFeeConfig() external {
-        vm.prank(admin);
-        auction.setSettlementConfig(admin, 2_000, 500);
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+        _setSettlementConfig(admin, 20 * USDC, 2_000, 500, keccak256("snapshot-new"), bidderA);
+        _setAuctionTimingConfig(30 minutes, 2 minutes, keccak256("snapshot-new-timing"), bidderA);
 
         Auction.AuctionConfig memory config = _createAuction(0);
         assertEq(config.paymentGracePeriodSeconds, 30 minutes);
@@ -183,25 +227,51 @@ contract AuctionEndWithdrawTest is Test {
         assertEq(config.sellerCommissionBps, 500);
     }
 
-    function testAuctionTimingConfigRejectsUnauthorizedCallerAndZeroValues() external {
-        vm.prank(stranger);
-        vm.expectRevert();
-        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+    function testAuctionTimingConfigRejectsInvalidSignerAndZeroValues() external {
+        Auction.AuctionTimingConfigAuthorization memory authorization =
+            _auctionTimingConfigAuthorization(30 minutes, 2 minutes, keccak256("invalid-timing-signer"));
+        bytes memory signature = _signAuctionTimingConfigAuthorization(authorization, strangerKey);
 
-        vm.startPrank(operator);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.setAuctionTimingConfig(authorization, signature);
+
+        authorization = _auctionTimingConfigAuthorization(0, 2 minutes, keccak256("zero-grace"));
         vm.expectRevert(Auction.InvalidAuctionTimingConfig.selector);
-        auction.setAuctionTimingConfig(0, 2 minutes);
+        auction.setAuctionTimingConfig(authorization, "");
+        authorization = _auctionTimingConfigAuthorization(30 minutes, 0, keccak256("zero-anti-snipe"));
         vm.expectRevert(Auction.InvalidAuctionTimingConfig.selector);
-        auction.setAuctionTimingConfig(30 minutes, 0);
-        vm.stopPrank();
+        auction.setAuctionTimingConfig(authorization, "");
+    }
+
+    function testAuctionTimingConfigRejectsExpiredReplayedAndModifiedAuthorization() external {
+        Auction.AuctionTimingConfigAuthorization memory authorization =
+            _auctionTimingConfigAuthorization(30 minutes, 2 minutes, keccak256("expired-timing"));
+        authorization.deadline = block.timestamp - 1;
+        bytes memory signature = _signAuctionTimingConfigAuthorization(authorization, operatorKey);
+
+        vm.expectRevert(Auction.AuthorizationExpired.selector);
+        auction.setAuctionTimingConfig(authorization, signature);
+
+        authorization = _auctionTimingConfigAuthorization(30 minutes, 2 minutes, keccak256("replayed-timing"));
+        signature = _signAuctionTimingConfigAuthorization(authorization, operatorKey);
+        auction.setAuctionTimingConfig(authorization, signature);
+
+        vm.expectRevert(Auction.NonceAlreadyUsed.selector);
+        auction.setAuctionTimingConfig(authorization, signature);
+
+        authorization = _auctionTimingConfigAuthorization(30 minutes, 2 minutes, keccak256("modified-timing"));
+        signature = _signAuctionTimingConfigAuthorization(authorization, operatorKey);
+        authorization.paymentGracePeriodSeconds = 1 hours;
+
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.setAuctionTimingConfig(authorization, signature);
     }
 
     function testOperatorCanUpdateTimingForAuctionBeforeItStarts() external {
         _createAuction(1 days);
         _createAuctionFor(LOT_ID_2, 1 days, STARTING_BID);
 
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(30 minutes, 2 minutes);
+        _setAuctionTimingConfig(30 minutes, 2 minutes, keccak256("preview-timing"), bidderA);
 
         bytes32[] memory lotIds = new bytes32[](2);
         lotIds[0] = LOT_ID;
@@ -255,6 +325,61 @@ contract AuctionEndWithdrawTest is Test {
         auction.updateAuctionTimingConfigs(lotIds);
     }
 
+    function testOperatorCanUpdateSettlementConfigForAuctionsBeforeTheyStart() external {
+        _createAuction(1 days);
+        _createAuctionFor(LOT_ID_2, 1 days, STARTING_BID);
+        _setSettlementConfig(admin, 50 * USDC, 2_000, 500, keccak256("batch-settlement"), bidderA);
+
+        bytes32[] memory lotIds = new bytes32[](2);
+        lotIds[0] = LOT_ID;
+        lotIds[1] = LOT_ID_2;
+
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit AuctionSettlementConfigUpdated(LOT_ID, 2_000, 500, block.timestamp);
+        vm.prank(operator);
+        auction.updateAuctionSettlementConfigs(lotIds);
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        assertEq(config.buyerPremiumBps, 2_000);
+        assertEq(config.sellerCommissionBps, 500);
+
+        config = auction.getAuction(LOT_ID_2);
+        assertEq(config.buyerPremiumBps, 2_000);
+        assertEq(config.sellerCommissionBps, 500);
+    }
+
+    function testAuctionSettlementConfigUpdateRejectsUnauthorizedInvalidBatchAndStartedAuction() external {
+        Auction.AuctionConfig memory config = _createAuction(1 days);
+        bytes32[] memory lotIds = new bytes32[](1);
+        lotIds[0] = LOT_ID;
+
+        vm.prank(stranger);
+        vm.expectRevert();
+        auction.updateAuctionSettlementConfigs(lotIds);
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidAmount.selector);
+        auction.updateAuctionSettlementConfigs(new bytes32[](0));
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.InvalidAmount.selector);
+        auction.updateAuctionSettlementConfigs(new bytes32[](11));
+
+        vm.warp(config.startTime);
+        vm.prank(operator);
+        vm.expectRevert(Auction.AuctionDetailsLocked.selector);
+        auction.updateAuctionSettlementConfigs(lotIds);
+    }
+
+    function testAuctionSettlementConfigUpdateRejectsUnknownAuction() external {
+        bytes32[] memory lotIds = new bytes32[](1);
+        lotIds[0] = UNKNOWN_LOT_ID;
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.AuctionNotFound.selector);
+        auction.updateAuctionSettlementConfigs(lotIds);
+    }
+
     function testEndAuctionWithWinnerStartsPaymentPendingWhenAllowanceIsMissing() external {
         Auction.AuctionConfig memory config = _createAuction(0);
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
@@ -296,8 +421,7 @@ contract AuctionEndWithdrawTest is Test {
     function testFeeConfigChangeDoesNotAffectExistingAuctionSettlement() external {
         Auction.AuctionConfig memory config = _createAuction(0);
 
-        vm.prank(admin);
-        auction.setSettlementConfig(admin, 2_000, 500);
+        _setSettlementConfig(admin, 20 * USDC, 2_000, 500, keccak256("settlement-existing"), bidderA);
 
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         _approveRemainingPayment(bidderA, STARTING_BID);
@@ -784,8 +908,7 @@ contract AuctionEndWithdrawTest is Test {
     function testPaymentDeadlineKeepsConfigFromAuctionEnd() external {
         Auction.AuctionConfig memory config = _createAuction(0);
 
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(10 minutes, 5 minutes);
+        _setAuctionTimingConfig(10 minutes, 5 minutes, keccak256("deadline-timing-1"), bidderA);
 
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         vm.warp(config.endTime);
@@ -794,8 +917,7 @@ contract AuctionEndWithdrawTest is Test {
         auction.endAuction(LOT_ID);
         uint256 originalDeadline = config.endTime + 1 hours;
 
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(2 hours, 5 minutes);
+        _setAuctionTimingConfig(2 hours, 5 minutes, keccak256("deadline-timing-2"), bidderA);
 
         assertEq(auction.auctionPaymentDeadline(LOT_ID), originalDeadline);
     }
@@ -1252,6 +1374,117 @@ contract AuctionEndWithdrawTest is Test {
         vm.warp(auction.auctionPaymentDeadline(LOT_ID));
     }
 
+    function _setSettlementConfig(
+        address treasury_,
+        uint256 applicationDepositAmount_,
+        uint16 buyerPremiumBps_,
+        uint16 sellerCommissionBps_,
+        bytes32 nonce,
+        address relayer
+    ) private {
+        Auction.SettlementConfigAuthorization memory authorization =
+            _settlementConfigAuthorization(
+                treasury_, applicationDepositAmount_, buyerPremiumBps_, sellerCommissionBps_, nonce
+            );
+        bytes memory signature = _signSettlementConfigAuthorization(authorization, operatorKey);
+
+        vm.prank(relayer);
+        auction.setSettlementConfig(authorization, signature);
+    }
+
+    function _settlementConfigAuthorization(
+        address treasury_,
+        uint256 applicationDepositAmount_,
+        uint16 buyerPremiumBps_,
+        uint16 sellerCommissionBps_,
+        bytes32 nonce
+    ) private view returns (Auction.SettlementConfigAuthorization memory) {
+        return Auction.SettlementConfigAuthorization({
+            treasury: treasury_,
+            applicationDepositAmount: applicationDepositAmount_,
+            buyerPremiumBps: buyerPremiumBps_,
+            sellerCommissionBps: sellerCommissionBps_,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours
+        });
+    }
+
+    function _signSettlementConfigAuthorization(
+        Auction.SettlementConfigAuthorization memory authorization,
+        uint256 signerKey
+    ) private view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH(),
+                authorization.treasury,
+                authorization.applicationDepositAmount,
+                authorization.buyerPremiumBps,
+                authorization.sellerCommissionBps,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+        return _signTypedData(structHash, signerKey);
+    }
+
+    function _setAuctionTimingConfig(
+        uint256 paymentGracePeriodSeconds_,
+        uint256 antiSnipeWindowSeconds_,
+        bytes32 nonce,
+        address relayer
+    ) private {
+        Auction.AuctionTimingConfigAuthorization memory authorization =
+            _auctionTimingConfigAuthorization(paymentGracePeriodSeconds_, antiSnipeWindowSeconds_, nonce);
+        bytes memory signature = _signAuctionTimingConfigAuthorization(authorization, operatorKey);
+
+        vm.prank(relayer);
+        auction.setAuctionTimingConfig(authorization, signature);
+    }
+
+    function _auctionTimingConfigAuthorization(
+        uint256 paymentGracePeriodSeconds_,
+        uint256 antiSnipeWindowSeconds_,
+        bytes32 nonce
+    ) private view returns (Auction.AuctionTimingConfigAuthorization memory) {
+        return Auction.AuctionTimingConfigAuthorization({
+            paymentGracePeriodSeconds: paymentGracePeriodSeconds_,
+            antiSnipeWindowSeconds: antiSnipeWindowSeconds_,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours
+        });
+    }
+
+    function _signAuctionTimingConfigAuthorization(
+        Auction.AuctionTimingConfigAuthorization memory authorization,
+        uint256 signerKey
+    ) private view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH(),
+                authorization.paymentGracePeriodSeconds,
+                authorization.antiSnipeWindowSeconds,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+        return _signTypedData(structHash, signerKey);
+    }
+
+    function _signTypedData(bytes32 structHash, uint256 signerKey) private view returns (bytes memory) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("NextVaultAuction")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(auction)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
     function _sign(Auction.CreateAuctionParams memory params, bytes32 nonce, uint256 deadline)
         private
         view
@@ -1279,17 +1512,6 @@ contract AuctionEndWithdrawTest is Test {
                 deadline
             )
         );
-        bytes32 domainSeparator = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes("NextVaultAuction")),
-                keccak256(bytes("1")),
-                block.chainid,
-                address(auction)
-            )
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(adminKey, digest);
-        return abi.encodePacked(r, s, v);
+        return _signTypedData(structHash, adminKey);
     }
 }

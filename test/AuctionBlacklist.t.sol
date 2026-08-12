@@ -130,8 +130,16 @@ contract AuctionBlacklistTest is Test {
         vm.expectRevert(Auction.InvalidAmount.selector);
         auction.depositConsignment(authorization, signature);
 
-        vm.prank(operator);
-        auction.setFinancialConfig(50 * USDC, 1_000, 1_000);
+        Auction.SettlementConfigAuthorization memory configAuthorization = Auction.SettlementConfigAuthorization({
+            treasury: admin,
+            applicationDepositAmount: 50 * USDC,
+            buyerPremiumBps: 1_000,
+            sellerCommissionBps: 1_000,
+            nonce: keccak256("configured-application-deposit"),
+            deadline: block.timestamp + 1 hours
+        });
+        vm.prank(bidder);
+        auction.setSettlementConfig(configAuthorization, _signSettlementConfigAuthorization(configAuthorization));
 
         authorization.amount = 50 * USDC;
         authorization.nonce = keccak256("configured-deposit");
@@ -326,6 +334,25 @@ contract AuctionBlacklistTest is Test {
                 keccak256(bytes(params.metadataUri)),
                 nonce,
                 deadline
+            )
+        );
+        return _signTypedData(structHash);
+    }
+
+    function _signSettlementConfigAuthorization(Auction.SettlementConfigAuthorization memory authorization)
+        private
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH(),
+                authorization.treasury,
+                authorization.applicationDepositAmount,
+                authorization.buyerPremiumBps,
+                authorization.sellerCommissionBps,
+                authorization.nonce,
+                authorization.deadline
             )
         );
         return _signTypedData(structHash);

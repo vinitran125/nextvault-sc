@@ -112,8 +112,7 @@ contract AuctionPlaceBidTest is Test {
     }
 
     function testPlaceBidUsesConfiguredAntiSnipeWindow() external {
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(1 hours, 2 minutes);
+        _setAuctionTimingConfig(1 hours, 2 minutes, keccak256("place-bid-timing"));
 
         _createActiveAuction();
         _buyNft(bidderA, 1);
@@ -135,8 +134,7 @@ contract AuctionPlaceBidTest is Test {
     function testPlaceBidUsesTimingConfigUpdatedDuringPreview() external {
         _createPreviewAuction();
 
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(1 hours, 2 minutes);
+        _setAuctionTimingConfig(1 hours, 2 minutes, keccak256("preview-bid-timing"));
 
         bytes32[] memory lotIds = new bytes32[](1);
         lotIds[0] = LOT_ID;
@@ -163,8 +161,7 @@ contract AuctionPlaceBidTest is Test {
         _buyNft(bidderA, 1);
         _approveBidDeposit(bidderA, STARTING_BID);
 
-        vm.prank(operator);
-        auction.setAuctionTimingConfig(1 hours, 2 minutes);
+        _setAuctionTimingConfig(1 hours, 2 minutes, keccak256("existing-bid-timing"));
 
         uint256 previousEndTime = auction.getAuction(LOT_ID).endTime;
         vm.warp(previousEndTime - 4 minutes);
@@ -361,6 +358,41 @@ contract AuctionPlaceBidTest is Test {
     function _approveBidDeposit(address bidder, uint256 bidAmount) private {
         vm.prank(bidder);
         token.approve(address(auction), bidAmount / 10);
+    }
+
+    function _setAuctionTimingConfig(uint256 paymentGracePeriodSeconds_, uint256 antiSnipeWindowSeconds_, bytes32 nonce)
+        private
+    {
+        uint256 deadline = block.timestamp + 1 hours;
+        Auction.AuctionTimingConfigAuthorization memory authorization = Auction.AuctionTimingConfigAuthorization({
+            paymentGracePeriodSeconds: paymentGracePeriodSeconds_,
+            antiSnipeWindowSeconds: antiSnipeWindowSeconds_,
+            nonce: nonce,
+            deadline: deadline
+        });
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH(),
+                paymentGracePeriodSeconds_,
+                antiSnipeWindowSeconds_,
+                nonce,
+                deadline
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("NextVaultAuction")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(auction)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(adminKey, digest);
+
+        vm.prank(bidderA);
+        auction.setAuctionTimingConfig(authorization, abi.encodePacked(r, s, v));
     }
 
     function _defaultParams() private view returns (Auction.CreateAuctionParams memory) {
