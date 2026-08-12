@@ -412,6 +412,11 @@ contract AuctionCreateTest is Test {
         auction.updateAuctionDetails(
             LOT_ID, makeAddr("new-consignor"), 22_000 * USDC, 21_000 * USDC, "ipfs://thumbnail"
         );
+
+        vm.expectRevert(Auction.InvalidStartingBid.selector);
+        auction.updateAuctionDetails(
+            LOT_ID, makeAddr("new-consignor"), STARTING_BID - USDC, 21_000 * USDC, "ipfs://thumbnail"
+        );
         vm.stopPrank();
     }
 
