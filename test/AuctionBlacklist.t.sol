@@ -113,23 +113,14 @@ contract AuctionBlacklistTest is Test {
         _blacklist(bidder);
 
         vm.prank(bidder);
-        token.approve(address(auction), authorization.amount);
+        token.approve(address(auction), auction.applicationDepositAmount());
         vm.prank(bidder);
         vm.expectRevert(Auction.BlacklistedWallet.selector);
         auction.depositConsignment(authorization, signature);
     }
 
-    function testConsignmentDepositMustMatchConfiguredApplicationDeposit() external {
+    function testConsignmentDepositUsesConfiguredApplicationDeposit() external {
         Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        authorization.amount += USDC;
-        bytes memory signature = _signDepositAuthorization(authorization);
-
-        vm.prank(bidder);
-        token.approve(address(auction), authorization.amount);
-        vm.prank(bidder);
-        vm.expectRevert(Auction.InvalidAmount.selector);
-        auction.depositConsignment(authorization, signature);
-
         Auction.SettlementConfigAuthorization memory configAuthorization = Auction.SettlementConfigAuthorization({
             treasury: admin,
             applicationDepositAmount: 50 * USDC,
@@ -141,11 +132,37 @@ contract AuctionBlacklistTest is Test {
         vm.prank(bidder);
         auction.setSettlementConfig(configAuthorization, _signSettlementConfigAuthorization(configAuthorization));
 
-        authorization.amount = 50 * USDC;
-        authorization.nonce = keccak256("configured-deposit");
-        signature = _signDepositAuthorization(authorization);
+        bytes memory signature = _signDepositAuthorization(authorization);
         vm.prank(bidder);
-        token.approve(address(auction), authorization.amount);
+        token.approve(address(auction), 50 * USDC);
+        vm.prank(bidder);
+        auction.depositConsignment(authorization, signature);
+
+        assertEq(token.balanceOf(address(auction)), 50 * USDC);
+    }
+
+    function testConsignmentDepositRevertsWithStaleAllowanceAndCanRetry() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
+        bytes memory signature = _signDepositAuthorization(authorization);
+        Auction.SettlementConfigAuthorization memory configAuthorization = Auction.SettlementConfigAuthorization({
+            treasury: admin,
+            applicationDepositAmount: 50 * USDC,
+            buyerPremiumBps: 1_000,
+            sellerCommissionBps: 1_000,
+            nonce: keccak256("updated-application-deposit"),
+            deadline: block.timestamp + 1 hours
+        });
+        vm.prank(bidder);
+        auction.setSettlementConfig(configAuthorization, _signSettlementConfigAuthorization(configAuthorization));
+
+        vm.prank(bidder);
+        token.approve(address(auction), 20 * USDC);
+        vm.prank(bidder);
+        vm.expectRevert();
+        auction.depositConsignment(authorization, signature);
+
+        vm.prank(bidder);
+        token.approve(address(auction), 50 * USDC);
         vm.prank(bidder);
         auction.depositConsignment(authorization, signature);
 
@@ -222,9 +239,10 @@ contract AuctionBlacklistTest is Test {
     function testBlacklistedWalletCanCancelExistingConsignmentDeposit() external {
         Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
         bytes memory signature = _signDepositAuthorization(authorization);
+        uint256 depositAmount = auction.applicationDepositAmount();
 
         vm.prank(bidder);
-        token.approve(address(auction), authorization.amount);
+        token.approve(address(auction), depositAmount);
         vm.prank(bidder);
         auction.depositConsignment(authorization, signature);
         _blacklist(bidder);
@@ -232,7 +250,7 @@ contract AuctionBlacklistTest is Test {
         uint256 balanceBeforeCancel = token.balanceOf(bidder);
         vm.prank(bidder);
         auction.cancelConsignmentDeposit(ITEM_ID);
-        assertEq(token.balanceOf(bidder), balanceBeforeCancel + authorization.amount);
+        assertEq(token.balanceOf(bidder), balanceBeforeCancel + depositAmount);
     }
 
     function _blacklist(address wallet) private {
@@ -285,7 +303,6 @@ contract AuctionBlacklistTest is Test {
         authorization = Auction.ConsignmentDepositAuthorization({
             itemId: ITEM_ID,
             consignor: bidder,
-            amount: auction.applicationDepositAmount(),
             nonce: keccak256("deposit-consignment"),
             deadline: block.timestamp + 1 hours
         });
@@ -301,7 +318,6 @@ contract AuctionBlacklistTest is Test {
                 auction.CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH(),
                 authorization.itemId,
                 authorization.consignor,
-                authorization.amount,
                 authorization.nonce,
                 authorization.deadline
             )

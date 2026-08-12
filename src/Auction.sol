@@ -25,9 +25,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 private constant MAX_AUCTION_CONFIG_UPDATE_BATCH_SIZE = 10;
     string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
     string internal constant NFT_COLLECTION_SYMBOL = "NV";
-    bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH = keccak256(
-        "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,uint256 amount,bytes32 nonce,uint256 deadline)"
-    );
+    bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH =
+        keccak256("ConsignmentDepositAuthorization(bytes32 itemId,address consignor,bytes32 nonce,uint256 deadline)");
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint256 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
     );
@@ -100,7 +99,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     struct ConsignmentDepositAuthorization {
         bytes32 itemId;
         address consignor;
-        uint256 amount;
         bytes32 nonce;
         uint256 deadline;
     }
@@ -886,7 +884,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     {
         if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
         if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
-        if (authorization.amount != applicationDepositAmount) revert InvalidAmount();
         if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.None) {
             revert ConsignmentDepositAlreadyExists();
         }
@@ -894,15 +891,14 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         _validateOperatorAuthorization(
             _hashConsignmentDepositAuthorization(authorization), authorization.nonce, authorization.deadline, signature
         );
-        itemDepositAmount[authorization.itemId] = authorization.amount;
+        uint256 amount = applicationDepositAmount;
+        itemDepositAmount[authorization.itemId] = amount;
         itemDepositConsignor[authorization.itemId] = msg.sender;
         itemDepositStatus[authorization.itemId] = ItemDepositStatus.Deposited;
 
-        token.safeTransferFrom(msg.sender, address(this), authorization.amount);
+        token.safeTransferFrom(msg.sender, address(this), amount);
 
-        emit ConsignmentDepositCreated(
-            authorization.itemId, msg.sender, address(token), authorization.amount, block.timestamp
-        );
+        emit ConsignmentDepositCreated(authorization.itemId, msg.sender, address(token), amount, block.timestamp);
     }
 
     function cancelConsignmentDeposit(bytes32 itemId) external {
@@ -957,7 +953,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH,
                 authorization.itemId,
                 authorization.consignor,
-                authorization.amount,
                 authorization.nonce,
                 authorization.deadline
             )
