@@ -29,6 +29,7 @@ contract AuctionBlacklistTest is Test {
     uint256 private constant STARTING_BALANCE = 100_000 * USDC;
 
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
+    event WalletDisabledUpdated(address indexed wallet, bool disabled, uint256 blockTimestamp);
 
     function setUp() external {
         token = new FakeUSDC();
@@ -70,6 +71,106 @@ contract AuctionBlacklistTest is Test {
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, bidder, operatorRole)
         );
         auction.setWalletBlacklist(bidder, true);
+    }
+
+    function testOperatorCanAuthorizeWalletDisableAndEnableForRelayer() external {
+        vm.expectEmit(true, false, false, true, address(auction));
+        emit WalletDisabledUpdated(bidder, true, block.timestamp);
+        _setWalletDisabled(bidder, true, keccak256("disable-wallet"), consignor);
+        assertTrue(auction.disabledWallets(bidder));
+
+        _setWalletDisabled(bidder, false, keccak256("enable-wallet"), consignor);
+        assertFalse(auction.disabledWallets(bidder));
+    }
+
+    function testWalletDisableRejectsInvalidSignerExpiredReplayAndModifiedAuthorization() external {
+        Auction.WalletDisabledAuthorization memory authorization =
+            _walletDisabledAuthorization(bidder, true, keccak256("invalid-disable-signer"));
+        bytes memory signature = _signWalletDisabledAuthorization(authorization, BIDDER_KEY);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.setWalletDisabled(authorization, signature);
+
+        authorization = _walletDisabledAuthorization(bidder, true, keccak256("expired-disable"));
+        authorization.deadline = block.timestamp - 1;
+        signature = _signWalletDisabledAuthorization(authorization, ADMIN_KEY);
+        vm.expectRevert(Auction.AuthorizationExpired.selector);
+        auction.setWalletDisabled(authorization, signature);
+
+        authorization = _walletDisabledAuthorization(bidder, true, keccak256("replayed-disable"));
+        signature = _signWalletDisabledAuthorization(authorization, ADMIN_KEY);
+        auction.setWalletDisabled(authorization, signature);
+        vm.expectRevert(Auction.NonceAlreadyUsed.selector);
+        auction.setWalletDisabled(authorization, signature);
+
+        authorization = _walletDisabledAuthorization(bidder, false, keccak256("modified-disable"));
+        signature = _signWalletDisabledAuthorization(authorization, ADMIN_KEY);
+        authorization.disabled = true;
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.setWalletDisabled(authorization, signature);
+    }
+
+    function testDisabledWalletCannotPlaceManualBidOrSetMaxBid() external {
+        _createActiveAuction();
+        _buyNft();
+        _setWalletDisabled(bidder, true, keccak256("disable-bidding"), consignor);
+
+        vm.startPrank(bidder);
+        vm.expectRevert(Auction.DisabledWallet.selector);
+        auction.placeBid(LOT_ID, STARTING_BID);
+        vm.expectRevert(Auction.DisabledWallet.selector);
+        auction.setMaxBid(LOT_ID, STARTING_BID);
+        vm.stopPrank();
+    }
+
+    function testExistingMaxBidContinuesAfterWalletIsDisabled() external {
+        _createActiveAuction();
+        _buyNft();
+        vm.prank(bidder);
+        token.approve(address(auction), STARTING_BID / 10);
+        vm.prank(bidder);
+        auction.setMaxBid(LOT_ID, STARTING_BID);
+        _setWalletDisabled(bidder, true, keccak256("disable-auto-bid"), consignor);
+
+        vm.prank(operator);
+        auction.placeBidFor(LOT_ID, bidder, STARTING_BID);
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE + STARTING_BID / 10);
+    }
+
+    function testDisabledWalletCannotBuyNftOrDepositNewConsignment() external {
+        _createActiveAuction();
+        _setWalletDisabled(bidder, true, keccak256("disable-wallet-actions"), consignor);
+
+        vm.prank(bidder);
+        token.approve(address(auction), NFT_PRICE);
+        vm.prank(bidder);
+        vm.expectRevert(Auction.DisabledWallet.selector);
+        auction.buyNFT(LOT_ID, 1);
+
+        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
+        bytes memory signature = _signDepositAuthorization(authorization);
+        uint256 depositAmount = auction.applicationDepositAmount();
+        vm.prank(bidder);
+        token.approve(address(auction), depositAmount);
+        vm.prank(bidder);
+        vm.expectRevert(Auction.DisabledWallet.selector);
+        auction.depositConsignment(authorization, signature);
+    }
+
+    function testDisabledWalletCanCancelExistingConsignmentDeposit() external {
+        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
+        bytes memory signature = _signDepositAuthorization(authorization);
+        uint256 depositAmount = auction.applicationDepositAmount();
+
+        vm.prank(bidder);
+        token.approve(address(auction), depositAmount);
+        vm.prank(bidder);
+        auction.depositConsignment(authorization, signature);
+        _setWalletDisabled(bidder, true, keccak256("disable-after-deposit"), consignor);
+
+        uint256 balanceBeforeCancel = token.balanceOf(bidder);
+        vm.prank(bidder);
+        auction.cancelConsignmentDeposit(ITEM_ID);
+        assertEq(token.balanceOf(bidder), balanceBeforeCancel + depositAmount);
     }
 
     function testBlacklistedWalletCannotBuyNft() external {
@@ -258,6 +359,39 @@ contract AuctionBlacklistTest is Test {
         auction.setWalletBlacklist(wallet, true);
     }
 
+    function _setWalletDisabled(address wallet, bool disabled, bytes32 nonce, address relayer) private {
+        Auction.WalletDisabledAuthorization memory authorization = _walletDisabledAuthorization(wallet, disabled, nonce);
+        bytes memory signature = _signWalletDisabledAuthorization(authorization, ADMIN_KEY);
+        vm.prank(relayer);
+        auction.setWalletDisabled(authorization, signature);
+    }
+
+    function _walletDisabledAuthorization(address wallet, bool disabled, bytes32 nonce)
+        private
+        view
+        returns (Auction.WalletDisabledAuthorization memory)
+    {
+        return Auction.WalletDisabledAuthorization({
+            wallet: wallet, disabled: disabled, nonce: nonce, deadline: block.timestamp + 1 hours
+        });
+    }
+
+    function _signWalletDisabledAuthorization(
+        Auction.WalletDisabledAuthorization memory authorization,
+        uint256 signerKey
+    ) private view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                auction.WALLET_DISABLED_AUTHORIZATION_TYPEHASH(),
+                authorization.wallet,
+                authorization.disabled,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+        return _signTypedDataWithKey(structHash, signerKey);
+    }
+
     function _createActiveAuction() private {
         Auction.CreateAuctionParams memory params = Auction.CreateAuctionParams({
             lotId: LOT_ID,
@@ -375,6 +509,10 @@ contract AuctionBlacklistTest is Test {
     }
 
     function _signTypedData(bytes32 structHash) private view returns (bytes memory) {
+        return _signTypedDataWithKey(structHash, ADMIN_KEY);
+    }
+
+    function _signTypedDataWithKey(bytes32 structHash, uint256 signerKey) private view returns (bytes memory) {
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -385,7 +523,7 @@ contract AuctionBlacklistTest is Test {
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ADMIN_KEY, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
         return abi.encodePacked(r, s, v);
     }
 }
