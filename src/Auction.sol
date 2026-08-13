@@ -36,6 +36,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     bytes32 public constant AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
         "AuctionTimingConfigAuthorization(uint256 paymentGracePeriodSeconds,uint256 antiSnipeWindowSeconds,bytes32 nonce,uint256 deadline)"
     );
+    bytes32 public constant WALLET_DISABLED_AUTHORIZATION_TYPEHASH =
+        keccak256("WalletDisabledAuthorization(address wallet,bool disabled,bytes32 nonce,uint256 deadline)");
 
     enum AuctionStatus {
         Preview,
@@ -119,6 +121,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         uint256 deadline;
     }
 
+    struct WalletDisabledAuthorization {
+        address wallet;
+        bool disabled;
+        bytes32 nonce;
+        uint256 deadline;
+    }
+
     error InvalidToken();
     error InvalidLotId();
     error LotAlreadyRegistered();
@@ -158,6 +167,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error AuctionDetailsLocked();
     error InvalidDesignManager();
     error BlacklistedWallet();
+    error DisabledWallet();
 
     event AuctionCreated(bytes32 indexed lotId, address indexed nftCollection, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
@@ -250,6 +260,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, bool isApproved, uint256 blockTimestamp
     );
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
+    event WalletDisabledUpdated(address indexed wallet, bool disabled, uint256 blockTimestamp);
     event AuctionRestarted(
         bytes32 indexed lotId,
         uint256 indexed previousRound,
@@ -296,6 +307,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public antiSnipeWindowSeconds;
     mapping(bytes32 => uint256) public auctionPaymentDeadline;
     uint256 public applicationDepositAmount;
+    mapping(address => bool) public disabledWallets;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -434,6 +446,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit WalletBlacklistUpdated(wallet, blacklisted, block.timestamp);
     }
 
+    function setWalletDisabled(WalletDisabledAuthorization calldata authorization, bytes calldata signature) external {
+        if (authorization.wallet == address(0)) revert InvalidConfig();
+
+        _validateOperatorAuthorization(
+            _hashWalletDisabledAuthorization(authorization), authorization.nonce, authorization.deadline, signature
+        );
+
+        disabledWallets[authorization.wallet] = authorization.disabled;
+        emit WalletDisabledUpdated(authorization.wallet, authorization.disabled, block.timestamp);
+    }
+
     function createAuction(
         CreateAuctionParams calldata params,
         bytes32 nonce,
@@ -534,7 +557,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function buyNFT(bytes32 lotId, uint256 quantity) external {
-        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
+        _checkWalletCanAct(msg.sender);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         AuctionConfig storage auction = auctions[lotId];
 
@@ -558,7 +581,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function placeBid(bytes32 lotId, uint256 amount) external {
-        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
+        _checkWalletCanAct(msg.sender);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig storage auction = auctions[lotId];
@@ -611,7 +634,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {
-        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
+        _checkWalletCanAct(msg.sender);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig memory auction = auctions[lotId];
@@ -882,7 +905,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     function depositConsignment(ConsignmentDepositAuthorization calldata authorization, bytes calldata signature)
         external
     {
-        if (blacklistedWallets[msg.sender]) revert BlacklistedWallet();
+        _checkWalletCanAct(msg.sender);
         if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
         if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.None) {
             revert ConsignmentDepositAlreadyExists();
@@ -1030,6 +1053,24 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return _hashTypedDataV4(structHash);
     }
 
+    function _hashWalletDisabledAuthorization(WalletDisabledAuthorization calldata authorization)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                WALLET_DISABLED_AUTHORIZATION_TYPEHASH,
+                authorization.wallet,
+                authorization.disabled,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
     function _validateOperatorAuthorization(bytes32 digest, bytes32 nonce, uint256 deadline, bytes calldata signature)
         internal
     {
@@ -1038,6 +1079,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (!hasRole(OPERATOR_ROLE, ECDSA.recover(digest, signature))) revert InvalidSigner();
 
         usedNonces[nonce] = true;
+    }
+
+    function _checkWalletCanAct(address wallet) internal view {
+        if (blacklistedWallets[wallet]) revert BlacklistedWallet();
+        if (disabledWallets[wallet]) revert DisabledWallet();
     }
 
     function _currentStatus(uint256 startTime, uint256 previewDurationSeconds, uint256 endTime)
