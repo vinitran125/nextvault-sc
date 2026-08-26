@@ -13,7 +13,9 @@ contract UpgradeAuctionScript is Script {
         vm.startBroadcast();
         Auction implementation = new Auction();
         Auction(payable(proxy)).upgradeToAndCall(address(implementation), "");
-        Auction(proxy).setBidAuthorizationRequired(true);
+        if (vm.envOr("ENABLE_BID_AUTHORIZATION", false)) {
+            Auction(proxy).setBidAuthorizationRequired(true);
+        }
         vm.stopBroadcast();
 
         upgradedAuction = Auction(proxy);

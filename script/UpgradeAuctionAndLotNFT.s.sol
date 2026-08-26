@@ -38,7 +38,9 @@ contract UpgradeAuctionAndLotNFTScript is Script {
         Auction auctionImplementation = new Auction();
 
         Auction(payable(proxy)).upgradeToAndCall(address(auctionImplementation), "");
-        Auction(proxy).setBidAuthorizationRequired(true);
+        if (vm.envOr("ENABLE_BID_AUTHORIZATION", false)) {
+            Auction(proxy).setBidAuthorizationRequired(true);
+        }
         designManager.initializeAuction(proxy);
         Auction(proxy).setNFTDesignManager(address(designManager));
         designManager.transferOwnership(admin);
