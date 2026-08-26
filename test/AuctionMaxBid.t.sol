@@ -54,6 +54,9 @@ contract AuctionMaxBidTest is Test {
         auction = Auction(address(proxy));
 
         vm.prank(admin);
+        auction.setBidAuthorizationRequired(false);
+
+        vm.prank(admin);
         designManager.initializeAuction(address(auction));
 
         bytes32 operatorRole = auction.OPERATOR_ROLE();

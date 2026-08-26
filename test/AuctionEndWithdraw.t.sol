@@ -86,6 +86,9 @@ contract AuctionEndWithdrawTest is Test {
         auction = Auction(address(new ERC1967Proxy(address(implementation), initData)));
 
         vm.prank(admin);
+        auction.setBidAuthorizationRequired(false);
+
+        vm.prank(admin);
         designManager.initializeAuction(address(auction));
 
         bytes32 operatorRole = auction.OPERATOR_ROLE();
