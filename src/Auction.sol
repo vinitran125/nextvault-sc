@@ -39,7 +39,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     bytes32 public constant WALLET_DISABLED_AUTHORIZATION_TYPEHASH =
         keccak256("WalletDisabledAuthorization(address wallet,bool disabled,bytes32 nonce,uint256 deadline)");
     bytes32 public constant BID_AUTHORIZATION_TYPEHASH = keccak256(
-        "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,uint256 depositAmount,uint256 biddingLimit,bytes32 nonce,uint256 deadline)"
+        "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,bytes32 nonce,uint256 deadline)"
     );
 
     enum AuctionStatus {
@@ -111,8 +111,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         address bidder;
         uint256 amount;
         BidType bidType;
-        uint256 depositAmount;
-        uint256 biddingLimit;
         bytes32 nonce;
         uint256 deadline;
     }
@@ -331,12 +329,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public applicationDepositAmount;
     mapping(address => bool) public disabledWallets;
     bool public bidAuthorizationRequired;
-    mapping(bytes32 => uint256) private itemToCurrentBidDeposit;
-    mapping(bytes32 => bool) private itemToCurrentBidDepositTracked;
-    mapping(bytes32 => mapping(address => uint256)) private itemBidderToMaxBidDeposit;
-    mapping(bytes32 => mapping(address => bool)) private itemBidderToMaxBidDepositTracked;
-    mapping(address => uint256) private bidderCreditExposure;
-    mapping(bytes32 => mapping(address => uint256)) private bidderAuctionCreditExposure;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -492,14 +484,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit BidAuthorizationRequirementUpdated(required, block.timestamp);
     }
 
-    function getBidCreditExposure(bytes32 lotId, address bidder)
-        external
-        view
-        returns (uint256 totalExposure, uint256 auctionExposure)
-    {
-        return (bidderCreditExposure[bidder], bidderAuctionCreditExposure[lotId][bidder]);
-    }
-
     function createAuction(
         CreateAuctionParams calldata params,
         bytes32 nonce,
@@ -625,21 +609,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     function placeBid(bytes32 lotId, uint256 amount) external {
         if (bidAuthorizationRequired) revert BidAuthorizationRequired();
-        _placeBid(lotId, msg.sender, amount, amount / 10);
+        _placeBid(lotId, msg.sender, amount);
     }
 
     function placeBid(BidAuthorization calldata authorization, bytes calldata signature) external {
         _validateBidAuthorization(authorization, BidType.Manual, signature);
-        _placeBid(authorization.lotId, msg.sender, authorization.amount, authorization.depositAmount);
-        _setBidCreditExposure(
-            authorization.lotId,
-            msg.sender,
-            authorization.depositAmount == 0 ? authorization.amount : 0,
-            authorization.biddingLimit
-        );
+        _placeBid(authorization.lotId, msg.sender, authorization.amount);
     }
 
-    function _placeBid(bytes32 lotId, address bidder, uint256 amount, uint256 depositAmount) internal {
+    function _placeBid(bytes32 lotId, address bidder, uint256 amount) internal {
         _checkWalletCanAct(bidder);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
@@ -655,15 +633,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (amount != expectedBid) revert InvalidBidAmount();
         if (amount < itemToMaxBid[lotId]) revert InvalidBidAmount();
 
-        if (depositAmount > amount / 10) revert InvalidBidAuthorization();
-        if (depositAmount > 0) token.safeTransferFrom(bidder, address(this), depositAmount);
+        token.safeTransferFrom(bidder, address(this), amount / 10);
         _refundBid(lotId);
 
         itemToCurrentBidder[lotId] = bidder;
         itemToCurrentBid[lotId] = amount;
         itemToAutoBid[lotId] = false;
-        itemToCurrentBidDeposit[lotId] = depositAmount;
-        itemToCurrentBidDepositTracked[lotId] = true;
 
         emit BidPlaced(lotId, bidder, currentBid, amount, block.timestamp);
         _extendAuctionIfNeeded(lotId);
@@ -697,21 +672,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {
         if (bidAuthorizationRequired) revert BidAuthorizationRequired();
-        _setMaxBid(lotId, msg.sender, amount, amount / 10);
+        _setMaxBid(lotId, msg.sender, amount);
     }
 
     function setMaxBid(BidAuthorization calldata authorization, bytes calldata signature) external {
         _validateBidAuthorization(authorization, BidType.Maximum, signature);
-        _setMaxBid(authorization.lotId, msg.sender, authorization.amount, authorization.depositAmount);
-        _setBidCreditExposure(
-            authorization.lotId,
-            msg.sender,
-            authorization.depositAmount == 0 ? authorization.amount : 0,
-            authorization.biddingLimit
-        );
+        _setMaxBid(authorization.lotId, msg.sender, authorization.amount);
     }
 
-    function _setMaxBid(bytes32 lotId, address bidder, uint256 amount, uint256 requiredDeposit) internal {
+    function _setMaxBid(bytes32 lotId, address bidder, uint256 amount) internal {
         _checkWalletCanAct(bidder);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
@@ -732,17 +701,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             revert InvalidBidAmount();
         }
 
-        if (requiredDeposit > amount / 10) revert InvalidBidAuthorization();
-        uint256 previousDeposit = _maxBidDeposit(lotId, bidder, previousMaxBid);
+        uint256 requiredDeposit = amount / 10;
+        uint256 previousDeposit = previousMaxBid / 10;
         if (requiredDeposit > previousDeposit) {
             token.safeTransferFrom(bidder, address(this), requiredDeposit - previousDeposit);
-        } else if (previousDeposit > requiredDeposit) {
-            token.safeTransfer(bidder, previousDeposit - requiredDeposit);
         }
 
         itemBidderToMaxBid[lotId][bidder] = amount;
-        itemBidderToMaxBidDeposit[lotId][bidder] = requiredDeposit;
-        itemBidderToMaxBidDepositTracked[lotId][bidder] = true;
         if (amount > itemToMaxBid[lotId]) {
             itemToMaxBid[lotId] = amount;
             itemToMaxBidder[lotId] = bidder;
@@ -756,12 +721,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (currentBidder == address(0)) return;
         if (itemToAutoBid[lotId]) return;
 
-        uint256 refundAmount = _currentBidDeposit(lotId);
-        itemToCurrentBidDeposit[lotId] = 0;
-        itemToCurrentBidDepositTracked[lotId] = true;
-        _releaseBidCreditExposure(lotId, currentBidder);
+        uint256 refundAmount = itemToCurrentBid[lotId] / 10;
 
-        if (refundAmount > 0) token.safeTransfer(currentBidder, refundAmount);
+        token.safeTransfer(currentBidder, refundAmount);
         emit BidRefunded(lotId, currentBidder, refundAmount, block.timestamp);
     }
 
@@ -771,19 +733,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             if (itemToCurrentBidder[lotId] == bidder) revert CurrentLeaderCannotWithdrawDeposit();
         }
 
-        uint256 maxBidAmount = itemBidderToMaxBid[lotId][bidder];
-        if (maxBidAmount == 0) revert InvalidAmount();
-        uint256 refundAmount = _maxBidDeposit(lotId, bidder, maxBidAmount);
+        uint256 refundAmount = itemBidderToMaxBid[lotId][bidder] / 10;
+        if (refundAmount == 0) revert InvalidAmount();
 
         itemBidderToMaxBid[lotId][bidder] = 0;
-        itemBidderToMaxBidDeposit[lotId][bidder] = 0;
-        itemBidderToMaxBidDepositTracked[lotId][bidder] = true;
-        _releaseBidCreditExposure(lotId, bidder);
         if (itemToMaxBidder[lotId] == bidder) {
             itemToMaxBidder[lotId] = address(0);
             itemToMaxBid[lotId] = 0;
         }
-        if (refundAmount > 0) token.safeTransfer(bidder, refundAmount);
+        token.safeTransfer(bidder, refundAmount);
 
         emit MaxBidRefunded(lotId, bidder, refundAmount, block.timestamp);
     }
@@ -816,9 +774,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         AuctionConfig storage auction = auctions[lotId];
         uint256 buyerPremium = (winningBid * auction.buyerPremiumBps) / BPS_DENOMINATOR;
         uint256 totalPayment = winningBid + buyerPremium;
-        uint256 deposited = itemToAutoBid[lotId]
-            ? _maxBidDeposit(lotId, winner, itemBidderToMaxBid[lotId][winner])
-            : _currentBidDeposit(lotId);
+        uint256 deposited = itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][winner] / 10 : winningBid / 10;
         uint256 remainingPayment = totalPayment > deposited ? totalPayment - deposited : 0;
         uint256 excessDeposit = deposited > totalPayment ? deposited - totalPayment : 0;
         if (token.balanceOf(winner) < remainingPayment || token.allowance(winner, address(this)) < remainingPayment) {
@@ -846,7 +802,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         INFTDesignManager(LotNFT(auction.nftCollection).designManager())
             .mintWinnerVariant(lotId, auction.nftCollection, winner);
-        _releaseBidCreditExposure(lotId, winner);
 
         emit AuctionSettled(
             lotId,
@@ -884,23 +839,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 revert AuctionPaymentGracePeriodActive(auctionPaymentDeadline[lotId]);
             }
             _setWalletBlacklist(winner, true);
-            _restartAuction(lotId, winner);
+            _restartAuction(lotId, winner, winningBid);
         }
     }
 
-    function _restartAuction(bytes32 lotId, address defaultedWinner) internal {
-        uint256 forfeitedDeposit = itemToAutoBid[lotId]
-            ? _maxBidDeposit(lotId, defaultedWinner, itemBidderToMaxBid[lotId][defaultedWinner])
-            : _currentBidDeposit(lotId);
+    function _restartAuction(bytes32 lotId, address defaultedWinner, uint256 winningBid) internal {
+        uint256 forfeitedDeposit =
+            itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][defaultedWinner] / 10 : winningBid / 10;
 
         if (itemToAutoBid[lotId]) {
             itemBidderToMaxBid[lotId][defaultedWinner] = 0;
-            itemBidderToMaxBidDeposit[lotId][defaultedWinner] = 0;
-            itemBidderToMaxBidDepositTracked[lotId][defaultedWinner] = true;
         }
-        itemToCurrentBidDeposit[lotId] = 0;
-        itemToCurrentBidDepositTracked[lotId] = true;
-        _releaseBidCreditExposure(lotId, defaultedWinner);
         if (forfeitedDeposit > 0) token.safeTransfer(treasury, forfeitedDeposit);
 
         uint256 previousRound = auctionBidRound[lotId];
@@ -1174,8 +1123,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 authorization.bidder,
                 authorization.amount,
                 authorization.bidType,
-                authorization.depositAmount,
-                authorization.biddingLimit,
                 authorization.nonce,
                 authorization.deadline
             )
@@ -1196,37 +1143,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         _validateOperatorAuthorization(
             _hashBidAuthorization(authorization), authorization.nonce, authorization.deadline, signature
         );
-    }
-
-    function _currentBidDeposit(bytes32 lotId) internal view returns (uint256) {
-        return itemToCurrentBidDepositTracked[lotId] ? itemToCurrentBidDeposit[lotId] : itemToCurrentBid[lotId] / 10;
-    }
-
-    function _maxBidDeposit(bytes32 lotId, address bidder, uint256 maxBidAmount) internal view returns (uint256) {
-        return
-            itemBidderToMaxBidDepositTracked[lotId][bidder]
-                ? itemBidderToMaxBidDeposit[lotId][bidder]
-                : maxBidAmount / 10;
-    }
-
-    function _setBidCreditExposure(bytes32 lotId, address bidder, uint256 auctionExposure, uint256 biddingLimit)
-        internal
-    {
-        uint256 previousAuctionExposure = bidderAuctionCreditExposure[lotId][bidder];
-        uint256 totalExposure = bidderCreditExposure[bidder] - previousAuctionExposure + auctionExposure;
-        if (totalExposure > biddingLimit) revert InvalidBidAuthorization();
-
-        bidderAuctionCreditExposure[lotId][bidder] = auctionExposure;
-        bidderCreditExposure[bidder] = totalExposure;
-    }
-
-    function _releaseBidCreditExposure(bytes32 lotId, address bidder) internal {
-        uint256 auctionExposure = bidderAuctionCreditExposure[lotId][bidder];
-        if (auctionExposure == 0) return;
-
-        uint256 totalExposure = bidderCreditExposure[bidder] - auctionExposure;
-        bidderAuctionCreditExposure[lotId][bidder] = 0;
-        bidderCreditExposure[bidder] = totalExposure;
     }
 
     function _validateOperatorAuthorization(bytes32 digest, bytes32 nonce, uint256 deadline, bytes calldata signature)
