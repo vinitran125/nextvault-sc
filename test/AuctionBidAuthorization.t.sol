@@ -63,13 +63,13 @@ contract AuctionBidAuthorizationTest is Test {
         Auction.BidAuthorization memory authorization =
             _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "manual");
         bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
-        _approveBidDeposit(bidderA, STARTING_BID);
-
         vm.prank(bidderA);
         auction.placeBid(authorization, signature);
 
         assertTrue(auction.usedNonces(authorization.nonce));
-        assertEq(token.balanceOf(address(auction)), NFT_PRICE * 2 + STARTING_BID / 10);
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE * 2);
+        (uint256 totalExposure,) = auction.getBidCreditExposure(LOT_ID, bidderA);
+        assertEq(totalExposure, STARTING_BID);
     }
 
     function testManualBidRejectsAmountChangedAfterSigning() external {
@@ -97,8 +97,6 @@ contract AuctionBidAuthorizationTest is Test {
         Auction.BidAuthorization memory authorization =
             _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "replay");
         bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
-        _approveBidDeposit(bidderA, STARTING_BID);
-
         vm.prank(bidderA);
         auction.placeBid(authorization, signature);
 
@@ -123,8 +121,6 @@ contract AuctionBidAuthorizationTest is Test {
         Auction.BidAuthorization memory authorization =
             _authorization(bidderA, maxBid, Auction.BidType.Maximum, "maximum");
         bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
-        _approveBidDeposit(bidderA, maxBid);
-
         vm.prank(bidderA);
         auction.setMaxBid(authorization, signature);
 
@@ -132,6 +128,8 @@ contract AuctionBidAuthorizationTest is Test {
         auction.placeBidFor(LOT_ID, bidderA, STARTING_BID);
 
         assertTrue(auction.usedNonces(authorization.nonce));
+        (uint256 totalExposure,) = auction.getBidCreditExposure(LOT_ID, bidderA);
+        assertEq(totalExposure, maxBid);
     }
 
     function testManualAuthorizationCannotSetMaximumBid() external {
@@ -152,6 +150,40 @@ contract AuctionBidAuthorizationTest is Test {
         vm.prank(bidderA);
         vm.expectRevert(Auction.InvalidSigner.selector);
         auction.placeBid(authorization, signature);
+    }
+
+    function testCreditBidCannotExceedSignedGlobalLimit() external {
+        Auction.BidAuthorization memory authorization =
+            _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "over-limit");
+        authorization.biddingLimit = STARTING_BID - 1;
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidBidAuthorization.selector);
+        auction.placeBid(authorization, signature);
+
+        (uint256 totalExposure,) = auction.getBidCreditExposure(LOT_ID, bidderA);
+        assertEq(totalExposure, 0);
+    }
+
+    function testOutbidReleasesManualCreditExposure() external {
+        Auction.BidAuthorization memory first =
+            _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "first-credit");
+        bytes memory firstSignature = _signBidAuthorization(first, ADMIN_KEY);
+        vm.prank(bidderA);
+        auction.placeBid(first, firstSignature);
+
+        uint256 nextBid = STARTING_BID + 1_000 * USDC;
+        Auction.BidAuthorization memory second =
+            _authorization(bidderB, nextBid, Auction.BidType.Manual, "second-credit");
+        bytes memory secondSignature = _signBidAuthorization(second, ADMIN_KEY);
+        vm.prank(bidderB);
+        auction.placeBid(second, secondSignature);
+
+        (uint256 bidderATotal,) = auction.getBidCreditExposure(LOT_ID, bidderA);
+        (uint256 bidderBTotal,) = auction.getBidCreditExposure(LOT_ID, bidderB);
+        assertEq(bidderATotal, 0);
+        assertEq(bidderBTotal, nextBid);
     }
 
     function testOnlyAdminCanDisableRequirementForStagedMigration() external {
@@ -179,6 +211,8 @@ contract AuctionBidAuthorizationTest is Test {
             bidder: bidder,
             amount: amount,
             bidType: bidType,
+            depositAmount: 0,
+            biddingLimit: type(uint256).max,
             nonce: keccak256(bytes(nonceSeed)),
             deadline: block.timestamp + 5 minutes
         });
@@ -196,6 +230,8 @@ contract AuctionBidAuthorizationTest is Test {
                 authorization.bidder,
                 authorization.amount,
                 authorization.bidType,
+                authorization.depositAmount,
+                authorization.biddingLimit,
                 authorization.nonce,
                 authorization.deadline
             )
