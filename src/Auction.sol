@@ -38,6 +38,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     );
     bytes32 public constant WALLET_DISABLED_AUTHORIZATION_TYPEHASH =
         keccak256("WalletDisabledAuthorization(address wallet,bool disabled,bytes32 nonce,uint256 deadline)");
+    bytes32 public constant BID_AUTHORIZATION_TYPEHASH = keccak256(
+        "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,bytes32 nonce,uint256 deadline)"
+    );
 
     enum AuctionStatus {
         Preview,
@@ -96,6 +99,20 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         Deposited,
         Cancelled,
         Refunded
+    }
+
+    enum BidType {
+        Manual,
+        Maximum
+    }
+
+    struct BidAuthorization {
+        bytes32 lotId;
+        address bidder;
+        uint256 amount;
+        BidType bidType;
+        bytes32 nonce;
+        uint256 deadline;
     }
 
     struct ConsignmentDepositAuthorization {
@@ -168,6 +185,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error InvalidDesignManager();
     error BlacklistedWallet();
     error DisabledWallet();
+    error BidAuthorizationRequired();
+    error InvalidBidAuthorization();
 
     event AuctionCreated(bytes32 indexed lotId, address indexed nftCollection, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
@@ -261,6 +280,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     );
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
     event WalletDisabledUpdated(address indexed wallet, bool disabled, uint256 blockTimestamp);
+    event BidAuthorizationRequirementUpdated(bool required, uint256 blockTimestamp);
     event AuctionRestarted(
         bytes32 indexed lotId,
         uint256 indexed previousRound,
@@ -308,6 +328,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     mapping(bytes32 => uint256) public auctionPaymentDeadline;
     uint256 public applicationDepositAmount;
     mapping(address => bool) public disabledWallets;
+    bool public bidAuthorizationRequired;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -333,6 +354,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         applicationDepositAmount = DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT * tokenDecimal;
         paymentGracePeriodSeconds = DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS;
         antiSnipeWindowSeconds = DEFAULT_ANTI_SNIPE_WINDOW_SECONDS;
+        bidAuthorizationRequired = true;
     }
 
     function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -455,6 +477,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         disabledWallets[authorization.wallet] = authorization.disabled;
         emit WalletDisabledUpdated(authorization.wallet, authorization.disabled, block.timestamp);
+    }
+
+    function setBidAuthorizationRequired(bool required) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        bidAuthorizationRequired = required;
+        emit BidAuthorizationRequirementUpdated(required, block.timestamp);
     }
 
     function createAuction(
@@ -581,7 +608,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function placeBid(bytes32 lotId, uint256 amount) external {
-        _checkWalletCanAct(msg.sender);
+        if (bidAuthorizationRequired) revert BidAuthorizationRequired();
+        _placeBid(lotId, msg.sender, amount);
+    }
+
+    function placeBid(BidAuthorization calldata authorization, bytes calldata signature) external {
+        _validateBidAuthorization(authorization, BidType.Manual, signature);
+        _placeBid(authorization.lotId, msg.sender, authorization.amount);
+    }
+
+    function _placeBid(bytes32 lotId, address bidder, uint256 amount) internal {
+        _checkWalletCanAct(bidder);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig storage auction = auctions[lotId];
@@ -589,21 +626,21 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         {
             revert AuctionNotActive();
         }
-        if (LotNFT(auction.nftCollection).balanceOf(msg.sender) == 0) revert NotEligibleToBid();
+        if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
 
         uint256 currentBid = itemToCurrentBid[lotId];
         uint256 expectedBid = currentBid == 0 ? auction.startingBid : currentBid + _bidIncrementFor(currentBid);
         if (amount != expectedBid) revert InvalidBidAmount();
         if (amount < itemToMaxBid[lotId]) revert InvalidBidAmount();
 
-        token.safeTransferFrom(msg.sender, address(this), amount / 10);
+        token.safeTransferFrom(bidder, address(this), amount / 10);
         _refundBid(lotId);
 
-        itemToCurrentBidder[lotId] = msg.sender;
+        itemToCurrentBidder[lotId] = bidder;
         itemToCurrentBid[lotId] = amount;
         itemToAutoBid[lotId] = false;
 
-        emit BidPlaced(lotId, msg.sender, currentBid, amount, block.timestamp);
+        emit BidPlaced(lotId, bidder, currentBid, amount, block.timestamp);
         _extendAuctionIfNeeded(lotId);
     }
 
@@ -634,7 +671,17 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     }
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {
-        _checkWalletCanAct(msg.sender);
+        if (bidAuthorizationRequired) revert BidAuthorizationRequired();
+        _setMaxBid(lotId, msg.sender, amount);
+    }
+
+    function setMaxBid(BidAuthorization calldata authorization, bytes calldata signature) external {
+        _validateBidAuthorization(authorization, BidType.Maximum, signature);
+        _setMaxBid(authorization.lotId, msg.sender, authorization.amount);
+    }
+
+    function _setMaxBid(bytes32 lotId, address bidder, uint256 amount) internal {
+        _checkWalletCanAct(bidder);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig memory auction = auctions[lotId];
@@ -642,34 +689,31 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         {
             revert AuctionNotActive();
         }
-        if (LotNFT(auction.nftCollection).balanceOf(msg.sender) == 0) revert NotEligibleToBid();
+        if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
 
         _validateBidOnLadder(lotId, auction.startingBid, amount);
 
         if (itemToCurrentBid[lotId] > amount) revert InvalidBidAmount();
 
-        uint256 previousMaxBid = itemBidderToMaxBid[lotId][msg.sender];
+        uint256 previousMaxBid = itemBidderToMaxBid[lotId][bidder];
         if (amount <= previousMaxBid) revert InvalidBidAmount();
-        if (
-            itemToMaxBidder[lotId] != address(0) && itemToMaxBidder[lotId] != msg.sender
-                && amount <= itemToMaxBid[lotId]
-        ) {
+        if (itemToMaxBidder[lotId] != address(0) && itemToMaxBidder[lotId] != bidder && amount <= itemToMaxBid[lotId]) {
             revert InvalidBidAmount();
         }
 
         uint256 requiredDeposit = amount / 10;
         uint256 previousDeposit = previousMaxBid / 10;
         if (requiredDeposit > previousDeposit) {
-            token.safeTransferFrom(msg.sender, address(this), requiredDeposit - previousDeposit);
+            token.safeTransferFrom(bidder, address(this), requiredDeposit - previousDeposit);
         }
 
-        itemBidderToMaxBid[lotId][msg.sender] = amount;
+        itemBidderToMaxBid[lotId][bidder] = amount;
         if (amount > itemToMaxBid[lotId]) {
             itemToMaxBid[lotId] = amount;
-            itemToMaxBidder[lotId] = msg.sender;
+            itemToMaxBidder[lotId] = bidder;
         }
 
-        emit MaxBidSet(lotId, msg.sender, amount, requiredDeposit, block.timestamp);
+        emit MaxBidSet(lotId, bidder, amount, requiredDeposit, block.timestamp);
     }
 
     function _refundBid(bytes32 lotId) internal {
@@ -1069,6 +1113,36 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         );
 
         return _hashTypedDataV4(structHash);
+    }
+
+    function _hashBidAuthorization(BidAuthorization calldata authorization) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                BID_AUTHORIZATION_TYPEHASH,
+                authorization.lotId,
+                authorization.bidder,
+                authorization.amount,
+                authorization.bidType,
+                authorization.nonce,
+                authorization.deadline
+            )
+        );
+
+        return _hashTypedDataV4(structHash);
+    }
+
+    function _validateBidAuthorization(
+        BidAuthorization calldata authorization,
+        BidType expectedBidType,
+        bytes calldata signature
+    ) internal {
+        if (authorization.bidder != msg.sender || authorization.bidType != expectedBidType) {
+            revert InvalidBidAuthorization();
+        }
+
+        _validateOperatorAuthorization(
+            _hashBidAuthorization(authorization), authorization.nonce, authorization.deadline, signature
+        );
     }
 
     function _validateOperatorAuthorization(bytes32 digest, bytes32 nonce, uint256 deadline, bytes calldata signature)
