@@ -454,6 +454,80 @@ contract AuctionBidAuthorizationTest is Test {
         assertEq(auctionDebtB, 1_000 * USDC);
     }
 
+    function testSettlementClearsOnlyWinningAuctionDebtAndPreservesOtherAuctionCollateral() external {
+        _createActiveAuctionFor(LOT_ID_2, "settlement-second-auction");
+        _buyNftFor(LOT_ID_2, bidderA);
+        uint256 biddingLimit = 20_000 * USDC;
+
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, 1_000 * USDC, biddingLimit, "winner-auction");
+        vm.prank(bidderA);
+        token.approve(address(auction), 500 * USDC);
+        _setAuthorizedMax(LOT_ID_2, bidderA, STARTING_BID, 500 * USDC, biddingLimit, "open-auction");
+
+        vm.prank(bidderA);
+        token.approve(address(auction), 11_000 * USDC);
+        vm.warp(auction.getAuction(LOT_ID).endTime);
+        vm.prank(operator);
+        (,, bool collected) = auction.endAuction(LOT_ID);
+
+        assertTrue(collected);
+        (uint256 totalDebt, uint256 settledAuctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        (, uint256 openAuctionDebt, uint256 openStandardDeposit, uint256 openActualDeposit) =
+            auction.getBidDepositDebt(LOT_ID_2, bidderA);
+        assertEq(totalDebt, 500 * USDC);
+        assertEq(settledAuctionDebt, 0);
+        assertEq(openAuctionDebt, 500 * USDC);
+        assertEq(openStandardDeposit, 1_000 * USDC);
+        assertEq(openActualDeposit, 500 * USDC);
+
+        uint256 bidderBalanceBeforeRefund = token.balanceOf(bidderA);
+        vm.prank(operator);
+        auction.refundMaxBid(LOT_ID_2, bidderA);
+        assertEq(token.balanceOf(bidderA), bidderBalanceBeforeRefund + 500 * USDC);
+        (totalDebt, openAuctionDebt,,) = auction.getBidDepositDebt(LOT_ID_2, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(openAuctionDebt, 0);
+    }
+
+    function testDebtPaydownTransfersExactAdditionalCollateral() external {
+        uint256 maxBid = 10_000 * USDC;
+        _setAuthorizedMax(LOT_ID, bidderA, maxBid, 1_000 * USDC, 20_000 * USDC, "fully-financed-max");
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+
+        vm.prank(bidderA);
+        token.approve(address(auction), 1_000 * USDC);
+        _setAuthorizedMax(LOT_ID, bidderA, 15_000 * USDC, 500 * USDC, 20_000 * USDC, "pay-down-debt");
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - 1_000 * USDC);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore + 1_000 * USDC);
+        (uint256 totalDebt, uint256 auctionDebt, uint256 standardDeposit, uint256 actualDeposit) =
+            auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 500 * USDC);
+        assertEq(auctionDebt, 500 * USDC);
+        assertEq(standardDeposit, 1_500 * USDC);
+        assertEq(actualDeposit, 1_000 * USDC);
+    }
+
+    function testZeroSignedLimitCannotCreateDebtOrConsumeNonce() external {
+        Auction.BidAuthorization memory authorization =
+            _authorizationWithDebt(LOT_ID, bidderA, STARTING_BID, Auction.BidType.Manual, 1, 0, "zero-limit-debt");
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.DepositDebtLimitExceeded.selector);
+        auction.placeBid(authorization, signature);
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore);
+        assertFalse(auction.usedNonces(authorization.nonce));
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+    }
+
     function testInvalidDebtCannotMoveTokensOrConsumeNonce() external {
         Auction.BidAuthorization memory authorization = _authorizationWithDebt(
             LOT_ID,
