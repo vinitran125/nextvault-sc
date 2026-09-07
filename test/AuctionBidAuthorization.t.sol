@@ -21,6 +21,7 @@ contract AuctionBidAuthorizationTest is Test {
     address private bidderB = makeAddr("bidderB");
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
+    bytes32 private constant LOT_ID_2 = bytes32(uint256(2));
     uint256 private constant USDC = 1e6;
     uint256 private constant STARTING_BID = 10_000 * USDC;
     uint256 private constant NFT_PRICE = 10 * USDC;
@@ -154,6 +155,198 @@ contract AuctionBidAuthorizationTest is Test {
         auction.placeBid(authorization, signature);
     }
 
+    function testDepositFreeBidTracksDebtWithoutPullingDeposit() external {
+        Auction.BidAuthorization memory authorization = _authorizationWithDebt(
+            LOT_ID, bidderA, STARTING_BID, Auction.BidType.Manual, STARTING_BID / 10, STARTING_BID, "free"
+        );
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        uint256 balanceBefore = token.balanceOf(bidderA);
+
+        vm.prank(bidderA);
+        auction.placeBid(authorization, signature);
+
+        (uint256 totalDebt, uint256 auctionDebt, uint256 standardDeposit, uint256 actualDeposit) =
+            auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, STARTING_BID / 10);
+        assertEq(auctionDebt, STARTING_BID / 10);
+        assertEq(standardDeposit, STARTING_BID / 10);
+        assertEq(actualDeposit, 0);
+        assertEq(token.balanceOf(bidderA), balanceBefore);
+    }
+
+    function testPartialDepositUsesOnlyCreditRemainingAcrossAuctions() external {
+        _createActiveAuctionFor(LOT_ID_2, "create-auction-2");
+        _buyNftFor(LOT_ID_2, bidderA);
+        uint256 biddingLimit = 15_000 * USDC;
+
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, STARTING_BID / 10, biddingLimit, "auction-1");
+
+        uint256 secondDebt = 500 * USDC;
+        uint256 secondActualDeposit = STARTING_BID / 10 - secondDebt;
+        vm.prank(bidderA);
+        token.approve(address(auction), secondActualDeposit);
+        _placeAuthorizedBid(LOT_ID_2, bidderA, STARTING_BID, secondDebt, biddingLimit, "auction-2");
+
+        (uint256 totalDebt, uint256 auctionDebt,, uint256 actualDeposit) = auction.getBidDepositDebt(LOT_ID_2, bidderA);
+        assertEq(totalDebt, biddingLimit / 10);
+        assertEq(auctionDebt, secondDebt);
+        assertEq(actualDeposit, secondActualDeposit);
+    }
+
+    function testConcurrentStaleAuthorizationsCannotOverspendCredit() external {
+        _createActiveAuctionFor(LOT_ID_2, "create-auction-2");
+        _buyNftFor(LOT_ID_2, bidderA);
+
+        Auction.BidAuthorization memory first = _authorizationWithDebt(
+            LOT_ID, bidderA, STARTING_BID, Auction.BidType.Manual, STARTING_BID / 10, STARTING_BID, "stale-1"
+        );
+        Auction.BidAuthorization memory second = _authorizationWithDebt(
+            LOT_ID_2, bidderA, STARTING_BID, Auction.BidType.Manual, STARTING_BID / 10, STARTING_BID, "stale-2"
+        );
+        bytes memory firstSignature = _signBidAuthorization(first, ADMIN_KEY);
+        bytes memory secondSignature = _signBidAuthorization(second, ADMIN_KEY);
+
+        vm.prank(bidderA);
+        auction.placeBid(first, firstSignature);
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.DepositDebtLimitExceeded.selector);
+        auction.placeBid(second, secondSignature);
+    }
+
+    function testAuthorizationRejectsTamperedDebtAndLimit() external {
+        Auction.BidAuthorization memory authorization = _authorizationWithDebt(
+            LOT_ID, bidderA, STARTING_BID, Auction.BidType.Manual, STARTING_BID / 10, STARTING_BID, "tamper-debt"
+        );
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        authorization.depositDebt -= 1;
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.placeBid(authorization, signature);
+
+        authorization = _authorizationWithDebt(
+            LOT_ID, bidderA, STARTING_BID, Auction.BidType.Manual, STARTING_BID / 10, STARTING_BID, "tamper-limit"
+        );
+        signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        authorization.biddingLimit += 1;
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.placeBid(authorization, signature);
+    }
+
+    function testLoweredLimitGrandfathersDebtButRejectsDebtIncrease() external {
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, STARTING_BID / 10, STARTING_BID, "initial-debt");
+
+        vm.prank(bidderA);
+        token.approve(address(auction), 100 * USDC);
+        _placeAuthorizedBid(LOT_ID, bidderA, 11_000 * USDC, STARTING_BID / 10, 5_000 * USDC, "same-debt");
+
+        Auction.BidAuthorization memory increased = _authorizationWithDebt(
+            LOT_ID, bidderA, 12_000 * USDC, Auction.BidType.Manual, 1_100 * USDC, 5_000 * USDC, "increase-debt"
+        );
+        bytes memory signature = _signBidAuthorization(increased, ADMIN_KEY);
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.DepositDebtLimitExceeded.selector);
+        auction.placeBid(increased, signature);
+    }
+
+    function testOutbidReleasesOnlyActualDepositAndDebt() external {
+        uint256 debt = 500 * USDC;
+        uint256 actualDeposit = STARTING_BID / 10 - debt;
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, debt, STARTING_BID, "partial-refund");
+
+        uint256 balanceBefore = token.balanceOf(bidderA);
+        _approveBidDeposit(bidderB, 11_000 * USDC);
+        _placeAuthorizedBid(LOT_ID, bidderB, 11_000 * USDC, 0, 0, "outbid");
+
+        assertEq(token.balanceOf(bidderA), balanceBefore + actualDeposit);
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+    }
+
+    function testManualAndMaxBidShareLargestAuctionExposure() external {
+        vm.prank(bidderA);
+        token.approve(address(auction), 500 * USDC);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, 500 * USDC, 20_000 * USDC, "manual-partial");
+
+        _setAuthorizedMax(LOT_ID, bidderA, 15_000 * USDC, 1_000 * USDC, 20_000 * USDC, "max-partial");
+
+        (uint256 totalDebt, uint256 auctionDebt, uint256 standardDeposit, uint256 actualDeposit) =
+            auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 1_000 * USDC);
+        assertEq(auctionDebt, 1_000 * USDC);
+        assertEq(standardDeposit, 1_500 * USDC);
+        assertEq(actualDeposit, 500 * USDC);
+
+        vm.prank(operator);
+        auction.placeBidFor(LOT_ID, bidderA, 11_000 * USDC);
+        (totalDebt, auctionDebt, standardDeposit, actualDeposit) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 1_000 * USDC);
+        assertEq(auctionDebt, 1_000 * USDC);
+        assertEq(standardDeposit, 1_500 * USDC);
+        assertEq(actualDeposit, 500 * USDC);
+    }
+
+    function testMaxBidIncreaseCannotRetroactivelyReduceDeposit() external {
+        vm.prank(bidderA);
+        token.approve(address(auction), 500 * USDC);
+        _setAuthorizedMax(LOT_ID, bidderA, STARTING_BID, 500 * USDC, 20_000 * USDC, "max-first");
+
+        Auction.BidAuthorization memory reducedDeposit = _authorizationWithDebt(
+            LOT_ID, bidderA, 15_000 * USDC, Auction.BidType.Maximum, 1_100 * USDC, 20_000 * USDC, "max-reallocate"
+        );
+        bytes memory signature = _signBidAuthorization(reducedDeposit, ADMIN_KEY);
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.DepositCannotBeReduced.selector);
+        auction.setMaxBid(reducedDeposit, signature);
+
+        _setAuthorizedMax(LOT_ID, bidderA, 15_000 * USDC, 1_000 * USDC, 20_000 * USDC, "max-increase");
+        (,,, uint256 actualDeposit) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(actualDeposit, 500 * USDC);
+    }
+
+    function testZeroDepositMaxBidCanBeRefundedAfterWithdraw() external {
+        _setAuthorizedMax(LOT_ID, bidderA, STARTING_BID, STARTING_BID / 10, STARTING_BID, "zero-deposit-max");
+
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+        vm.prank(operator);
+        auction.refundMaxBid(LOT_ID, bidderA);
+
+        (uint256 totalDebt, uint256 auctionDebt, uint256 standardDeposit, uint256 actualDeposit) =
+            auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+        assertEq(standardDeposit, 0);
+        assertEq(actualDeposit, 0);
+    }
+
+    function testWinnerPaymentFailureKeepsDebtAndSuccessfulRetryReleasesIt() external {
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, STARTING_BID / 10, STARTING_BID, "winner-deposit-debt");
+        uint256 endTime = auction.getAuction(LOT_ID).endTime;
+        vm.warp(endTime);
+
+        vm.prank(operator);
+        (,, bool collected) = auction.endAuction(LOT_ID);
+        assertFalse(collected);
+        (uint256 totalDebtBefore,,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebtBefore, STARTING_BID / 10);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), 11_000 * USDC);
+        vm.prank(bidderA);
+        assertTrue(auction.settleAuctionPayment(LOT_ID));
+
+        (uint256 totalDebtAfter, uint256 auctionDebtAfter,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebtAfter, 0);
+        assertEq(auctionDebtAfter, 0);
+    }
+
     function testOnlyAdminCanDisableRequirementForStagedMigration() external {
         vm.prank(operator);
         vm.expectRevert();
@@ -179,9 +372,64 @@ contract AuctionBidAuthorizationTest is Test {
             bidder: bidder,
             amount: amount,
             bidType: bidType,
+            depositDebt: 0,
+            biddingLimit: 0,
             nonce: keccak256(bytes(nonceSeed)),
             deadline: block.timestamp + 5 minutes
         });
+    }
+
+    function _authorizationWithDebt(
+        bytes32 lotId,
+        address bidder,
+        uint256 amount,
+        Auction.BidType bidType,
+        uint256 depositDebt,
+        uint256 biddingLimit,
+        string memory nonceSeed
+    ) private view returns (Auction.BidAuthorization memory) {
+        return Auction.BidAuthorization({
+            lotId: lotId,
+            bidder: bidder,
+            amount: amount,
+            bidType: bidType,
+            depositDebt: depositDebt,
+            biddingLimit: biddingLimit,
+            nonce: keccak256(bytes(nonceSeed)),
+            deadline: block.timestamp + 5 minutes
+        });
+    }
+
+    function _placeAuthorizedBid(
+        bytes32 lotId,
+        address bidder,
+        uint256 amount,
+        uint256 depositDebt,
+        uint256 biddingLimit,
+        string memory nonceSeed
+    ) private {
+        Auction.BidAuthorization memory authorization = _authorizationWithDebt(
+            lotId, bidder, amount, Auction.BidType.Manual, depositDebt, biddingLimit, nonceSeed
+        );
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        vm.prank(bidder);
+        auction.placeBid(authorization, signature);
+    }
+
+    function _setAuthorizedMax(
+        bytes32 lotId,
+        address bidder,
+        uint256 amount,
+        uint256 depositDebt,
+        uint256 biddingLimit,
+        string memory nonceSeed
+    ) private {
+        Auction.BidAuthorization memory authorization = _authorizationWithDebt(
+            lotId, bidder, amount, Auction.BidType.Maximum, depositDebt, biddingLimit, nonceSeed
+        );
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        vm.prank(bidder);
+        auction.setMaxBid(authorization, signature);
     }
 
     function _signBidAuthorization(Auction.BidAuthorization memory authorization, uint256 signerKey)
@@ -196,6 +444,8 @@ contract AuctionBidAuthorizationTest is Test {
                 authorization.bidder,
                 authorization.amount,
                 authorization.bidType,
+                authorization.depositDebt,
+                authorization.biddingLimit,
                 authorization.nonce,
                 authorization.deadline
             )
@@ -218,8 +468,12 @@ contract AuctionBidAuthorizationTest is Test {
     }
 
     function _createActiveAuction() private {
+        _createActiveAuctionFor(LOT_ID, "create-auction");
+    }
+
+    function _createActiveAuctionFor(bytes32 lotId, string memory nonceSeed) private {
         Auction.CreateAuctionParams memory params = Auction.CreateAuctionParams({
-            lotId: LOT_ID,
+            lotId: lotId,
             consignor: consignor,
             lowEstimate: STARTING_BID,
             highEstimate: 20_000 * USDC,
@@ -235,7 +489,7 @@ contract AuctionBidAuthorizationTest is Test {
             thumbnailUrl: "ipfs://thumbnail",
             metadataUri: "ipfs://metadata/"
         });
-        bytes32 nonce = keccak256("create-auction");
+        bytes32 nonce = keccak256(bytes(nonceSeed));
         uint256 deadline = block.timestamp + 1 hours;
         auction.createAuction(params, nonce, deadline, _signCreateAuction(params, nonce, deadline));
     }
@@ -273,10 +527,14 @@ contract AuctionBidAuthorizationTest is Test {
     }
 
     function _buyNft(address buyer) private {
+        _buyNftFor(LOT_ID, buyer);
+    }
+
+    function _buyNftFor(bytes32 lotId, address buyer) private {
         vm.prank(buyer);
         token.approve(address(auction), NFT_PRICE);
         vm.prank(buyer);
-        auction.buyNFT(LOT_ID, 1);
+        auction.buyNFT(lotId, 1);
     }
 
     function _approveBidDeposit(address bidder, uint256 amount) private {

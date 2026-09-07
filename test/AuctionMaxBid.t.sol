@@ -34,7 +34,13 @@ contract AuctionMaxBidTest is Test {
     uint256 private constant STARTING_BALANCE = 100_000 * USDC;
 
     event BidPlaced(
-        bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
+        bytes32 indexed lotId,
+        address indexed bidder,
+        uint256 previousBid,
+        uint256 amount,
+        uint256 depositAmount,
+        uint256 depositDebt,
+        uint256 blockTimestamp
     );
     event AuctionExtended(bytes32 indexed lotId, uint256 newEndTime);
     event MaxBidSet(
@@ -261,7 +267,7 @@ contract AuctionMaxBidTest is Test {
         auction.setMaxBid(LOT_ID, maxBid);
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, STARTING_BID, STARTING_BID, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderA, STARTING_BID, STARTING_BID, 1_500 * USDC, 0, block.timestamp);
 
         vm.prank(operator);
         auction.placeBidFor(LOT_ID, bidderA, STARTING_BID);
@@ -280,7 +286,7 @@ contract AuctionMaxBidTest is Test {
         uint256 newEndTime = block.timestamp + 5 minutes;
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, STARTING_BID, STARTING_BID, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderA, STARTING_BID, STARTING_BID, STARTING_BID / 10, 0, block.timestamp);
         vm.expectEmit(true, false, false, true, address(auction));
         emit AuctionExtended(LOT_ID, newEndTime);
 
@@ -299,7 +305,7 @@ contract AuctionMaxBidTest is Test {
         auction.setMaxBid(LOT_ID, 15_000 * USDC);
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, STARTING_BID, 15_000 * USDC, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderA, STARTING_BID, 15_000 * USDC, 1_500 * USDC, 0, block.timestamp);
 
         vm.prank(operator);
         auction.placeBidFor(LOT_ID, bidderA, 15_000 * USDC);
@@ -410,7 +416,7 @@ contract AuctionMaxBidTest is Test {
         auction.placeBidFor(LOT_ID, bidderA, STARTING_BID);
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, 11_000 * USDC, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, 11_000 * USDC, 1_600 * USDC, 0, block.timestamp);
 
         vm.prank(operator);
         auction.placeBidFor(LOT_ID, bidderB, 11_000 * USDC);
@@ -522,7 +528,7 @@ contract AuctionMaxBidTest is Test {
         _setMaxBid(bidderB, 18_000 * USDC);
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, 18_000 * USDC, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, 18_000 * USDC, 1_800 * USDC, 0, block.timestamp);
 
         vm.prank(operator);
         auction.placeBidFor(LOT_ID, bidderB, 18_000 * USDC);
@@ -668,19 +674,19 @@ contract AuctionMaxBidTest is Test {
 
         _approveBidDeposit(bidderA, STARTING_BID);
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, STARTING_BID / 10, 0, block.timestamp);
         vm.prank(bidderA);
         auction.placeBid(LOT_ID, STARTING_BID);
 
         _setMaxBid(bidderB, 15_000 * USDC);
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, 15_000 * USDC, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, 15_000 * USDC, 1_500 * USDC, 0, block.timestamp);
         vm.prank(operator);
         auction.placeBidFor(LOT_ID, bidderB, 15_000 * USDC);
 
         _approveBidDeposit(bidderC, 16_000 * USDC);
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderC, 15_000 * USDC, 16_000 * USDC, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderC, 15_000 * USDC, 16_000 * USDC, 1_600 * USDC, 0, block.timestamp);
         vm.prank(bidderC);
         auction.placeBid(LOT_ID, 16_000 * USDC);
 
