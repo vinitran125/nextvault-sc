@@ -33,7 +33,13 @@ contract AuctionPlaceBidTest is Test {
     uint256 private constant STARTING_BALANCE = 100_000 * USDC;
 
     event BidPlaced(
-        bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
+        bytes32 indexed lotId,
+        address indexed bidder,
+        uint256 previousBid,
+        uint256 amount,
+        uint256 depositAmount,
+        uint256 depositDebt,
+        uint256 blockTimestamp
     );
     event AuctionExtended(bytes32 indexed lotId, uint256 newEndTime);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
@@ -71,7 +77,7 @@ contract AuctionPlaceBidTest is Test {
         _approveBidDeposit(bidderA, STARTING_BID);
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, STARTING_BID / 10, 0, block.timestamp);
 
         vm.prank(bidderA);
         auction.placeBid(LOT_ID, STARTING_BID);
@@ -90,7 +96,7 @@ contract AuctionPlaceBidTest is Test {
         uint256 newEndTime = block.timestamp + 5 minutes;
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderA, 0, STARTING_BID, STARTING_BID / 10, 0, block.timestamp);
         vm.expectEmit(true, false, false, true, address(auction));
         emit AuctionExtended(LOT_ID, newEndTime);
 
@@ -191,7 +197,7 @@ contract AuctionPlaceBidTest is Test {
         vm.expectEmit(true, true, false, true, address(auction));
         emit BidRefunded(LOT_ID, bidderA, STARTING_BID / 10, block.timestamp);
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, nextBid, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, nextBid, nextBid / 10, 0, block.timestamp);
 
         vm.prank(bidderB);
         auction.placeBid(LOT_ID, nextBid);
@@ -325,7 +331,7 @@ contract AuctionPlaceBidTest is Test {
         _approveBidDeposit(bidderB, nextBid);
 
         vm.expectEmit(true, true, false, true, address(auction));
-        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, nextBid, block.timestamp);
+        emit BidPlaced(LOT_ID, bidderB, STARTING_BID, nextBid, nextBid / 10, 0, block.timestamp);
 
         vm.prank(bidderB);
         auction.placeBid(LOT_ID, nextBid);

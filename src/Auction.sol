@@ -39,7 +39,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     bytes32 public constant WALLET_DISABLED_AUTHORIZATION_TYPEHASH =
         keccak256("WalletDisabledAuthorization(address wallet,bool disabled,bytes32 nonce,uint256 deadline)");
     bytes32 public constant BID_AUTHORIZATION_TYPEHASH = keccak256(
-        "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,bytes32 nonce,uint256 deadline)"
+        "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,uint256 depositDebt,uint256 biddingLimit,bytes32 nonce,uint256 deadline)"
     );
 
     enum AuctionStatus {
@@ -111,8 +111,15 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         address bidder;
         uint256 amount;
         BidType bidType;
+        uint256 depositDebt;
+        uint256 biddingLimit;
         bytes32 nonce;
         uint256 deadline;
+    }
+
+    struct DepositDebtLedger {
+        uint256 totalDebt;
+        mapping(bytes32 => uint256) debtByAuction;
     }
 
     struct ConsignmentDepositAuthorization {
@@ -187,6 +194,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     error DisabledWallet();
     error BidAuthorizationRequired();
     error InvalidBidAuthorization();
+    error DepositDebtLimitExceeded();
+    error DepositCannotBeReduced();
 
     event AuctionCreated(bytes32 indexed lotId, address indexed nftCollection, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
@@ -246,7 +255,13 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         bytes32 indexed lotId, address indexed holder, uint256[] tokenIds, uint256 refundAmount, uint256 blockTimestamp
     );
     event BidPlaced(
-        bytes32 indexed lotId, address indexed bidder, uint256 previousBid, uint256 amount, uint256 blockTimestamp
+        bytes32 indexed lotId,
+        address indexed bidder,
+        uint256 previousBid,
+        uint256 amount,
+        uint256 depositAmount,
+        uint256 depositDebt,
+        uint256 blockTimestamp
     );
     event AuctionExtended(bytes32 indexed lotId, uint256 newEndTime);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
@@ -329,6 +344,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     uint256 public applicationDepositAmount;
     mapping(address => bool) public disabledWallets;
     bool public bidAuthorizationRequired;
+
+    // Append-only upgrade storage. A zero debt preserves the legacy full-deposit behaviour.
+    mapping(address => DepositDebtLedger) private bidderDepositDebt;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -484,6 +502,18 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         emit BidAuthorizationRequirementUpdated(required, block.timestamp);
     }
 
+    function getBidDepositDebt(bytes32 lotId, address bidder)
+        external
+        view
+        returns (uint256 totalDebt, uint256 auctionDebt, uint256 standardDeposit, uint256 actualDeposit)
+    {
+        DepositDebtLedger storage ledger = bidderDepositDebt[bidder];
+        totalDebt = ledger.totalDebt;
+        auctionDebt = ledger.debtByAuction[lotId];
+        standardDeposit = _bidderExposure(lotId, bidder) / 10;
+        actualDeposit = standardDeposit - auctionDebt;
+    }
+
     function createAuction(
         CreateAuctionParams calldata params,
         bytes32 nonce,
@@ -609,15 +639,29 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     function placeBid(bytes32 lotId, uint256 amount) external {
         if (bidAuthorizationRequired) revert BidAuthorizationRequired();
-        _placeBid(lotId, msg.sender, amount);
+        _placeBid(lotId, msg.sender, amount, 0, 0, false);
     }
 
     function placeBid(BidAuthorization calldata authorization, bytes calldata signature) external {
         _validateBidAuthorization(authorization, BidType.Manual, signature);
-        _placeBid(authorization.lotId, msg.sender, authorization.amount);
+        _placeBid(
+            authorization.lotId,
+            msg.sender,
+            authorization.amount,
+            authorization.depositDebt,
+            authorization.biddingLimit,
+            true
+        );
     }
 
-    function _placeBid(bytes32 lotId, address bidder, uint256 amount) internal {
+    function _placeBid(
+        bytes32 lotId,
+        address bidder,
+        uint256 amount,
+        uint256 newDebt,
+        uint256 biddingLimit,
+        bool enforceDebtLimit
+    ) internal {
         _checkWalletCanAct(bidder);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
@@ -633,14 +677,21 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (amount != expectedBid) revert InvalidBidAmount();
         if (amount < itemToMaxBid[lotId]) revert InvalidBidAmount();
 
-        token.safeTransferFrom(bidder, address(this), amount / 10);
-        _refundBid(lotId);
+        uint256 newExposure = _max(amount, itemBidderToMaxBid[lotId][bidder]);
+        (uint256 oldActualDeposit, uint256 newActualDeposit) =
+            _validateDebtChange(lotId, bidder, newExposure, newDebt, biddingLimit, enforceDebtLimit);
+        if (newActualDeposit > oldActualDeposit) {
+            token.safeTransferFrom(bidder, address(this), newActualDeposit - oldActualDeposit);
+        }
+
+        if (itemToCurrentBidder[lotId] != bidder) _refundBid(lotId);
 
         itemToCurrentBidder[lotId] = bidder;
         itemToCurrentBid[lotId] = amount;
         itemToAutoBid[lotId] = false;
+        _setDepositDebt(lotId, bidder, newDebt);
 
-        emit BidPlaced(lotId, bidder, currentBid, amount, block.timestamp);
+        emit BidPlaced(lotId, bidder, currentBid, amount, newActualDeposit, newDebt, block.timestamp);
         _extendAuctionIfNeeded(lotId);
     }
 
@@ -665,22 +716,38 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         itemToAutoBid[lotId] = true;
 
         uint256 previousBid = currentBid == 0 ? auction.startingBid : currentBid;
+        uint256 debt = bidderDepositDebt[bidder].debtByAuction[lotId];
+        uint256 actualDeposit = itemBidderToMaxBid[lotId][bidder] / 10 - debt;
 
-        emit BidPlaced(lotId, bidder, previousBid, amount, block.timestamp);
+        emit BidPlaced(lotId, bidder, previousBid, amount, actualDeposit, debt, block.timestamp);
         _extendAuctionIfNeeded(lotId);
     }
 
     function setMaxBid(bytes32 lotId, uint256 amount) external {
         if (bidAuthorizationRequired) revert BidAuthorizationRequired();
-        _setMaxBid(lotId, msg.sender, amount);
+        _setMaxBid(lotId, msg.sender, amount, 0, 0, false);
     }
 
     function setMaxBid(BidAuthorization calldata authorization, bytes calldata signature) external {
         _validateBidAuthorization(authorization, BidType.Maximum, signature);
-        _setMaxBid(authorization.lotId, msg.sender, authorization.amount);
+        _setMaxBid(
+            authorization.lotId,
+            msg.sender,
+            authorization.amount,
+            authorization.depositDebt,
+            authorization.biddingLimit,
+            true
+        );
     }
 
-    function _setMaxBid(bytes32 lotId, address bidder, uint256 amount) internal {
+    function _setMaxBid(
+        bytes32 lotId,
+        address bidder,
+        uint256 amount,
+        uint256 newDebt,
+        uint256 biddingLimit,
+        bool enforceDebtLimit
+    ) internal {
         _checkWalletCanAct(bidder);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
@@ -701,19 +768,21 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             revert InvalidBidAmount();
         }
 
-        uint256 requiredDeposit = amount / 10;
-        uint256 previousDeposit = previousMaxBid / 10;
-        if (requiredDeposit > previousDeposit) {
-            token.safeTransferFrom(bidder, address(this), requiredDeposit - previousDeposit);
+        uint256 newExposure = _max(_manualBidAmount(lotId, bidder), amount);
+        (uint256 oldActualDeposit, uint256 newActualDeposit) =
+            _validateDebtChange(lotId, bidder, newExposure, newDebt, biddingLimit, enforceDebtLimit);
+        if (newActualDeposit > oldActualDeposit) {
+            token.safeTransferFrom(bidder, address(this), newActualDeposit - oldActualDeposit);
         }
 
         itemBidderToMaxBid[lotId][bidder] = amount;
+        _setDepositDebt(lotId, bidder, newDebt);
         if (amount > itemToMaxBid[lotId]) {
             itemToMaxBid[lotId] = amount;
             itemToMaxBidder[lotId] = bidder;
         }
 
-        emit MaxBidSet(lotId, bidder, amount, requiredDeposit, block.timestamp);
+        emit MaxBidSet(lotId, bidder, amount, newActualDeposit, block.timestamp);
     }
 
     function _refundBid(bytes32 lotId) internal {
@@ -721,9 +790,14 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (currentBidder == address(0)) return;
         if (itemToAutoBid[lotId]) return;
 
-        uint256 refundAmount = itemToCurrentBid[lotId] / 10;
+        uint256 oldExposure = _bidderExposure(lotId, currentBidder);
+        uint256 oldDebt = bidderDepositDebt[currentBidder].debtByAuction[lotId];
+        uint256 newExposure = itemBidderToMaxBid[lotId][currentBidder];
+        uint256 newDebt = _min(oldDebt, newExposure / 10);
+        uint256 refundAmount = oldExposure / 10 - oldDebt - (newExposure / 10 - newDebt);
+        _setDepositDebt(lotId, currentBidder, newDebt);
 
-        token.safeTransfer(currentBidder, refundAmount);
+        if (refundAmount > 0) token.safeTransfer(currentBidder, refundAmount);
         emit BidRefunded(lotId, currentBidder, refundAmount, block.timestamp);
     }
 
@@ -733,15 +807,21 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             if (itemToCurrentBidder[lotId] == bidder) revert CurrentLeaderCannotWithdrawDeposit();
         }
 
-        uint256 refundAmount = itemBidderToMaxBid[lotId][bidder] / 10;
-        if (refundAmount == 0) revert InvalidAmount();
+        uint256 maxBidAmount = itemBidderToMaxBid[lotId][bidder];
+        if (maxBidAmount == 0) revert InvalidAmount();
+        uint256 oldExposure = _bidderExposure(lotId, bidder);
+        uint256 oldDebt = bidderDepositDebt[bidder].debtByAuction[lotId];
+        uint256 newExposure = _manualBidAmount(lotId, bidder);
+        uint256 newDebt = _min(oldDebt, newExposure / 10);
+        uint256 refundAmount = oldExposure / 10 - oldDebt - (newExposure / 10 - newDebt);
 
         itemBidderToMaxBid[lotId][bidder] = 0;
+        _setDepositDebt(lotId, bidder, newDebt);
         if (itemToMaxBidder[lotId] == bidder) {
             itemToMaxBidder[lotId] = address(0);
             itemToMaxBid[lotId] = 0;
         }
-        token.safeTransfer(bidder, refundAmount);
+        if (refundAmount > 0) token.safeTransfer(bidder, refundAmount);
 
         emit MaxBidRefunded(lotId, bidder, refundAmount, block.timestamp);
     }
@@ -774,7 +854,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         AuctionConfig storage auction = auctions[lotId];
         uint256 buyerPremium = (winningBid * auction.buyerPremiumBps) / BPS_DENOMINATOR;
         uint256 totalPayment = winningBid + buyerPremium;
-        uint256 deposited = itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][winner] / 10 : winningBid / 10;
+        uint256 deposited = _actualBidDeposit(lotId, winner);
         uint256 remainingPayment = totalPayment > deposited ? totalPayment - deposited : 0;
         uint256 excessDeposit = deposited > totalPayment ? deposited - totalPayment : 0;
         if (token.balanceOf(winner) < remainingPayment || token.allowance(winner, address(this)) < remainingPayment) {
@@ -802,6 +882,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
         INFTDesignManager(LotNFT(auction.nftCollection).designManager())
             .mintWinnerVariant(lotId, auction.nftCollection, winner);
+
+        _clearWinnerDepositDebt(lotId, winner);
 
         emit AuctionSettled(
             lotId,
@@ -839,17 +921,14 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 revert AuctionPaymentGracePeriodActive(auctionPaymentDeadline[lotId]);
             }
             _setWalletBlacklist(winner, true);
-            _restartAuction(lotId, winner, winningBid);
+            _restartAuction(lotId, winner);
         }
     }
 
-    function _restartAuction(bytes32 lotId, address defaultedWinner, uint256 winningBid) internal {
-        uint256 forfeitedDeposit =
-            itemToAutoBid[lotId] ? itemBidderToMaxBid[lotId][defaultedWinner] / 10 : winningBid / 10;
+    function _restartAuction(bytes32 lotId, address defaultedWinner) internal {
+        uint256 forfeitedDeposit = _actualBidDeposit(lotId, defaultedWinner);
 
-        if (itemToAutoBid[lotId]) {
-            itemBidderToMaxBid[lotId][defaultedWinner] = 0;
-        }
+        _clearWinnerDepositDebt(lotId, defaultedWinner);
         if (forfeitedDeposit > 0) token.safeTransfer(treasury, forfeitedDeposit);
 
         uint256 previousRound = auctionBidRound[lotId];
@@ -1123,6 +1202,8 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
                 authorization.bidder,
                 authorization.amount,
                 authorization.bidType,
+                authorization.depositDebt,
+                authorization.biddingLimit,
                 authorization.nonce,
                 authorization.deadline
             )
@@ -1143,6 +1224,68 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         _validateOperatorAuthorization(
             _hashBidAuthorization(authorization), authorization.nonce, authorization.deadline, signature
         );
+    }
+
+    function _validateDebtChange(
+        bytes32 lotId,
+        address bidder,
+        uint256 newExposure,
+        uint256 newDebt,
+        uint256 biddingLimit,
+        bool enforceDebtLimit
+    ) internal view returns (uint256 oldActualDeposit, uint256 newActualDeposit) {
+        DepositDebtLedger storage ledger = bidderDepositDebt[bidder];
+        uint256 oldDebt = ledger.debtByAuction[lotId];
+        uint256 oldStandardDeposit = _bidderExposure(lotId, bidder) / 10;
+        uint256 newStandardDeposit = newExposure / 10;
+
+        if (newDebt > newStandardDeposit) revert InvalidBidAuthorization();
+        if (!enforceDebtLimit && newDebt != 0) revert InvalidBidAuthorization();
+
+        oldActualDeposit = oldStandardDeposit - oldDebt;
+        newActualDeposit = newStandardDeposit - newDebt;
+        if (newActualDeposit < oldActualDeposit) revert DepositCannotBeReduced();
+
+        if (newDebt > oldDebt) {
+            uint256 debtIncrease = newDebt - oldDebt;
+            uint256 standardIncrease =
+                newStandardDeposit > oldStandardDeposit ? newStandardDeposit - oldStandardDeposit : 0;
+            if (debtIncrease > standardIncrease) revert DepositCannotBeReduced();
+            if (ledger.totalDebt - oldDebt + newDebt > biddingLimit / 10) revert DepositDebtLimitExceeded();
+        }
+    }
+
+    function _setDepositDebt(bytes32 lotId, address bidder, uint256 newDebt) internal {
+        DepositDebtLedger storage ledger = bidderDepositDebt[bidder];
+        uint256 oldDebt = ledger.debtByAuction[lotId];
+        ledger.debtByAuction[lotId] = newDebt;
+        ledger.totalDebt = ledger.totalDebt - oldDebt + newDebt;
+    }
+
+    function _manualBidAmount(bytes32 lotId, address bidder) internal view returns (uint256) {
+        if (itemToCurrentBidder[lotId] != bidder || itemToAutoBid[lotId]) return 0;
+        return itemToCurrentBid[lotId];
+    }
+
+    function _bidderExposure(bytes32 lotId, address bidder) internal view returns (uint256) {
+        return _max(_manualBidAmount(lotId, bidder), itemBidderToMaxBid[lotId][bidder]);
+    }
+
+    function _actualBidDeposit(bytes32 lotId, address bidder) internal view returns (uint256) {
+        return _bidderExposure(lotId, bidder) / 10 - bidderDepositDebt[bidder].debtByAuction[lotId];
+    }
+
+    function _clearWinnerDepositDebt(bytes32 lotId, address bidder) internal {
+        itemBidderToMaxBid[lotId][bidder] = 0;
+        _setDepositDebt(lotId, bidder, 0);
+    }
+
+    function _max(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a : b;
+    }
+
+    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
     }
 
     function _validateOperatorAuthorization(bytes32 digest, bytes32 nonce, uint256 deadline, bytes calldata signature)
