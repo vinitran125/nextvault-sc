@@ -381,7 +381,9 @@ contract AuctionPlaceBidTest is Test {
         });
         bytes32 structHash = keccak256(
             abi.encode(
-                auction.AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH(),
+                keccak256(
+                    "AuctionTimingConfigAuthorization(uint256 paymentGracePeriodSeconds,uint256 antiSnipeWindowSeconds,bytes32 nonce,uint256 deadline)"
+                ),
                 paymentGracePeriodSeconds_,
                 antiSnipeWindowSeconds_,
                 nonce,
