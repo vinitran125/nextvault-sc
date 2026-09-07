@@ -94,6 +94,36 @@ contract AuctionBidAuthorizationTest is Test {
         auction.placeBid(authorization, signature);
     }
 
+    function testBidAuthorizationCannotBeReusedOnAnotherAuctionProxy() external {
+        Auction.BidAuthorization memory authorization =
+            _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "wrong-proxy");
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        Auction secondImplementation = new Auction();
+        Auction secondAuction = Auction(
+            address(
+                new ERC1967Proxy(
+                    address(secondImplementation),
+                    abi.encodeCall(Auction.initialize, (token, admin, auction.nftDesignManager()))
+                )
+            )
+        );
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        secondAuction.placeBid(authorization, signature);
+    }
+
+    function testBidAuthorizationCannotBeReusedOnAnotherChain() external {
+        Auction.BidAuthorization memory authorization =
+            _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "wrong-chain");
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        vm.chainId(block.chainid + 1);
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidSigner.selector);
+        auction.placeBid(authorization, signature);
+    }
+
     function testManualBidAuthorizationCannotBeReplayed() external {
         Auction.BidAuthorization memory authorization =
             _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "replay");
@@ -727,7 +757,9 @@ contract AuctionBidAuthorizationTest is Test {
     {
         bytes32 structHash = keccak256(
             abi.encode(
-                auction.BID_AUTHORIZATION_TYPEHASH(),
+                keccak256(
+                    "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,uint256 depositDebt,uint256 biddingLimit,bytes32 nonce,uint256 deadline)"
+                ),
                 authorization.lotId,
                 authorization.bidder,
                 authorization.amount,

@@ -1418,7 +1418,9 @@ contract AuctionEndWithdrawTest is Test {
     ) private view returns (bytes memory) {
         bytes32 structHash = keccak256(
             abi.encode(
-                auction.SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH(),
+                keccak256(
+                    "SettlementConfigAuthorization(address treasury,uint256 applicationDepositAmount,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
+                ),
                 authorization.treasury,
                 authorization.applicationDepositAmount,
                 authorization.buyerPremiumBps,
@@ -1463,7 +1465,9 @@ contract AuctionEndWithdrawTest is Test {
     ) private view returns (bytes memory) {
         bytes32 structHash = keccak256(
             abi.encode(
-                auction.AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH(),
+                keccak256(
+                    "AuctionTimingConfigAuthorization(uint256 paymentGracePeriodSeconds,uint256 antiSnipeWindowSeconds,bytes32 nonce,uint256 deadline)"
+                ),
                 authorization.paymentGracePeriodSeconds,
                 authorization.antiSnipeWindowSeconds,
                 authorization.nonce,

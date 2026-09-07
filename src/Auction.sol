@@ -2,43 +2,41 @@
 pragma solidity ^0.8.13;
 
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {AuctionSignatureVerifier} from "./AuctionSignatureVerifier.sol";
 import {LotNFT} from "./LotNFT.sol";
 import {INFTDesignManager} from "./interfaces/INFTDesignManager.sol";
 
-contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, UUPSUpgradeable {
+contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
-    uint256 public constant BPS_DENOMINATOR = 10_000;
-    uint16 public constant DEFAULT_BUYER_PREMIUM_BPS = 1_000;
-    uint16 public constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
-    uint256 public constant DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT = 20;
-    uint256 public constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
-    uint256 public constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
+    uint256 internal constant BPS_DENOMINATOR = 10_000;
+    uint16 internal constant DEFAULT_BUYER_PREMIUM_BPS = 1_000;
+    uint16 internal constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
+    uint256 internal constant DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT = 20;
+    uint256 internal constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
+    uint256 internal constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
     uint256 private constant MAX_AUCTION_CONFIG_UPDATE_BATCH_SIZE = 10;
     string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
     string internal constant NFT_COLLECTION_SYMBOL = "NV";
-    bytes32 public constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH =
+    bytes32 internal constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH =
         keccak256("ConsignmentDepositAuthorization(bytes32 itemId,address consignor,bytes32 nonce,uint256 deadline)");
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint256 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
     );
-    bytes32 public constant SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 internal constant SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
         "SettlementConfigAuthorization(address treasury,uint256 applicationDepositAmount,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
     );
-    bytes32 public constant AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 internal constant AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
         "AuctionTimingConfigAuthorization(uint256 paymentGracePeriodSeconds,uint256 antiSnipeWindowSeconds,bytes32 nonce,uint256 deadline)"
     );
-    bytes32 public constant WALLET_DISABLED_AUTHORIZATION_TYPEHASH =
+    bytes32 internal constant WALLET_DISABLED_AUTHORIZATION_TYPEHASH =
         keccak256("WalletDisabledAuthorization(address wallet,bool disabled,bytes32 nonce,uint256 deadline)");
-    bytes32 public constant BID_AUTHORIZATION_TYPEHASH = keccak256(
+    bytes32 internal constant BID_AUTHORIZATION_TYPEHASH = keccak256(
         "BidAuthorization(bytes32 lotId,address bidder,uint256 amount,uint8 bidType,uint256 depositDebt,uint256 biddingLimit,bytes32 nonce,uint256 deadline)"
     );
 
@@ -348,8 +346,11 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
     // Append-only upgrade storage. A zero debt preserves the legacy full-deposit behaviour.
     mapping(address => DepositDebtLedger) private bidderDepositDebt;
 
+    AuctionSignatureVerifier public immutable SIGNATURE_VERIFIER;
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
+        SIGNATURE_VERIFIER = new AuctionSignatureVerifier();
         _disableInitializers();
     }
 
@@ -362,7 +363,6 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         tokenDecimal = 10 ** IERC20Metadata(address(token_)).decimals();
 
         __AccessControl_init();
-        __EIP712_init("NextVaultAuction", "1");
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(OPERATOR_ROLE, admin);
 
@@ -1094,7 +1094,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
 
     function _hashConsignmentDepositAuthorization(ConsignmentDepositAuthorization calldata authorization)
         internal
-        view
+        pure
         returns (bytes32)
     {
         bytes32 structHash = keccak256(
@@ -1107,12 +1107,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             )
         );
 
-        return _hashTypedDataV4(structHash);
+        return structHash;
     }
 
     function _hashCreateAuctionAuthorization(CreateAuctionParams calldata params, bytes32 nonce, uint256 deadline)
         internal
-        view
+        pure
         returns (bytes32)
     {
         bytes32 structHash = keccak256(
@@ -1138,12 +1138,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             )
         );
 
-        return _hashTypedDataV4(structHash);
+        return structHash;
     }
 
     function _hashSettlementConfigAuthorization(SettlementConfigAuthorization calldata authorization)
         internal
-        view
+        pure
         returns (bytes32)
     {
         bytes32 structHash = keccak256(
@@ -1158,12 +1158,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             )
         );
 
-        return _hashTypedDataV4(structHash);
+        return structHash;
     }
 
     function _hashAuctionTimingConfigAuthorization(AuctionTimingConfigAuthorization calldata authorization)
         internal
-        view
+        pure
         returns (bytes32)
     {
         bytes32 structHash = keccak256(
@@ -1176,12 +1176,12 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             )
         );
 
-        return _hashTypedDataV4(structHash);
+        return structHash;
     }
 
     function _hashWalletDisabledAuthorization(WalletDisabledAuthorization calldata authorization)
         internal
-        view
+        pure
         returns (bytes32)
     {
         bytes32 structHash = keccak256(
@@ -1194,10 +1194,10 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             )
         );
 
-        return _hashTypedDataV4(structHash);
+        return structHash;
     }
 
-    function _hashBidAuthorization(BidAuthorization calldata authorization) internal view returns (bytes32) {
+    function _hashBidAuthorization(BidAuthorization calldata authorization) internal pure returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
                 BID_AUTHORIZATION_TYPEHASH,
@@ -1212,7 +1212,7 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
             )
         );
 
-        return _hashTypedDataV4(structHash);
+        return structHash;
     }
 
     function _validateBidAuthorization(
@@ -1291,12 +1291,16 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         return a < b ? a : b;
     }
 
-    function _validateOperatorAuthorization(bytes32 digest, bytes32 nonce, uint256 deadline, bytes calldata signature)
-        internal
-    {
+    function _validateOperatorAuthorization(
+        bytes32 structHash,
+        bytes32 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) internal {
         if (block.timestamp > deadline) revert AuthorizationExpired();
         if (usedNonces[nonce]) revert NonceAlreadyUsed();
-        if (!hasRole(OPERATOR_ROLE, ECDSA.recover(digest, signature))) revert InvalidSigner();
+        address signer = SIGNATURE_VERIFIER.recoverSigner(structHash, address(this), signature);
+        if (!hasRole(OPERATOR_ROLE, signer)) revert InvalidSigner();
 
         usedNonces[nonce] = true;
     }
