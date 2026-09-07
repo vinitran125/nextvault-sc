@@ -980,6 +980,9 @@ contract Auction is Initializable, AccessControlUpgradeable, EIP712Upgradeable, 
         if (itemToCurrentBidder[lotId] != address(0)) {
             _refundBid(lotId);
         }
+        itemToCurrentBid[lotId] = 0;
+        itemToCurrentBidder[lotId] = address(0);
+        itemToAutoBid[lotId] = false;
     }
 
     function claimNFTRefund(bytes32 lotId, uint256[] calldata tokenIds) external {

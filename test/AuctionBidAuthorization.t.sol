@@ -326,6 +326,220 @@ contract AuctionBidAuthorizationTest is Test {
         assertEq(actualDeposit, 0);
     }
 
+    function testWithdrawManualAndMaxRefundsCashAndReleasesAllDebt() external {
+        uint256 balanceBefore = token.balanceOf(bidderA);
+        vm.prank(bidderA);
+        token.approve(address(auction), 500 * USDC);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, 500 * USDC, 20_000 * USDC, "withdraw-manual");
+        _setAuthorizedMax(LOT_ID, bidderA, 15_000 * USDC, 1_000 * USDC, 20_000 * USDC, "withdraw-max");
+
+        assertEq(token.balanceOf(bidderA), balanceBefore - 500 * USDC);
+        vm.prank(operator);
+        auction.withdrawAuction(LOT_ID);
+        vm.prank(operator);
+        auction.refundMaxBid(LOT_ID, bidderA);
+
+        assertEq(token.balanceOf(bidderA), balanceBefore);
+        (uint256 totalDebt, uint256 auctionDebt, uint256 standardDeposit, uint256 actualDeposit) =
+            auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+        assertEq(standardDeposit, 0);
+        assertEq(actualDeposit, 0);
+    }
+
+    function testManualWinnerPaysDepositDebtExactlyOnce() external {
+        uint256 actualDeposit = 400 * USDC;
+        uint256 depositDebt = STARTING_BID / 10 - actualDeposit;
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+        uint256 treasuryBalanceBefore = token.balanceOf(admin);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, depositDebt, STARTING_BID, "manual-winner");
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore + actualDeposit);
+
+        uint256 buyerPremium = STARTING_BID / 10;
+        uint256 remainingPayment = STARTING_BID + buyerPremium - actualDeposit;
+        vm.prank(bidderA);
+        token.approve(address(auction), remainingPayment);
+        vm.warp(auction.getAuction(LOT_ID).endTime);
+        vm.prank(operator);
+        (address winner, uint256 winningBid, bool collected) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, STARTING_BID);
+        assertTrue(collected);
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - STARTING_BID - buyerPremium);
+        assertEq(token.balanceOf(consignor), 9_000 * USDC);
+        assertEq(token.balanceOf(admin), treasuryBalanceBefore + 2_000 * USDC);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore);
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+    }
+
+    function testAutoBidWinnerUsesActualMaxDepositAndCollectsDebtAtSettlement() external {
+        uint256 maxBid = 15_000 * USDC;
+        uint256 depositDebt = 1_000 * USDC;
+        uint256 actualDeposit = maxBid / 10 - depositDebt;
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _setAuthorizedMax(LOT_ID, bidderA, maxBid, depositDebt, 20_000 * USDC, "auto-winner-max");
+        vm.prank(operator);
+        auction.placeBidFor(LOT_ID, bidderA, STARTING_BID);
+
+        uint256 totalPayment = 11_000 * USDC;
+        vm.prank(bidderA);
+        token.approve(address(auction), totalPayment - actualDeposit);
+        vm.warp(auction.getAuction(LOT_ID).endTime);
+        vm.prank(operator);
+        (,, bool collected) = auction.endAuction(LOT_ID);
+
+        assertTrue(collected);
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - totalPayment);
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+    }
+
+    function testDefaultForfeitsOnlyActualDepositAndReleasesCredit() external {
+        uint256 actualDeposit = 400 * USDC;
+        uint256 depositDebt = STARTING_BID / 10 - actualDeposit;
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+        uint256 treasuryBalanceBefore = token.balanceOf(admin);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, depositDebt, STARTING_BID, "default-partial");
+        vm.warp(auction.getAuction(LOT_ID).endTime);
+        vm.prank(operator);
+        auction.endAuction(LOT_ID);
+
+        vm.warp(auction.auctionPaymentDeadline(LOT_ID));
+        vm.prank(operator);
+        assertFalse(auction.settleAuctionPayment(LOT_ID));
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - actualDeposit);
+        assertEq(token.balanceOf(admin), treasuryBalanceBefore + actualDeposit);
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+        assertTrue(auction.blacklistedWallets(bidderA));
+    }
+
+    function testNonWinnerMaxRefundDoesNotReleaseDebtFromAnotherAuction() external {
+        _createActiveAuctionFor(LOT_ID_2, "refund-second-auction");
+        _buyNftFor(LOT_ID_2, bidderA);
+        uint256 biddingLimit = 20_000 * USDC;
+
+        vm.prank(bidderA);
+        token.approve(address(auction), 500 * USDC);
+        _setAuthorizedMax(LOT_ID, bidderA, 15_000 * USDC, 1_000 * USDC, biddingLimit, "refund-max-a");
+        _placeAuthorizedBid(LOT_ID_2, bidderA, STARTING_BID, 1_000 * USDC, biddingLimit, "refund-manual-b");
+
+        vm.prank(bidderB);
+        token.approve(address(auction), 1_600 * USDC);
+        _setAuthorizedMax(LOT_ID, bidderB, 16_000 * USDC, 0, 0, "blocking-max");
+        vm.prank(operator);
+        auction.refundMaxBid(LOT_ID, bidderA);
+
+        (uint256 totalDebtA, uint256 auctionDebtA,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        (, uint256 auctionDebtB,,) = auction.getBidDepositDebt(LOT_ID_2, bidderA);
+        assertEq(totalDebtA, 1_000 * USDC);
+        assertEq(auctionDebtA, 0);
+        assertEq(auctionDebtB, 1_000 * USDC);
+    }
+
+    function testInvalidDebtCannotMoveTokensOrConsumeNonce() external {
+        Auction.BidAuthorization memory authorization = _authorizationWithDebt(
+            LOT_ID,
+            bidderA,
+            STARTING_BID,
+            Auction.BidType.Manual,
+            STARTING_BID / 10 + 1,
+            STARTING_BID * 2,
+            "invalid-debt"
+        );
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+        uint256 contractBalanceBefore = token.balanceOf(address(auction));
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.InvalidBidAuthorization.selector);
+        auction.placeBid(authorization, signature);
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore);
+        assertEq(token.balanceOf(address(auction)), contractBalanceBefore);
+        assertFalse(auction.usedNonces(authorization.nonce));
+    }
+
+    function testFuzzManualRefundConservesUserFunds(uint96 rawDebt) external {
+        uint256 standardDeposit = STARTING_BID / 10;
+        uint256 debt = bound(uint256(rawDebt), 0, standardDeposit);
+        uint256 actualDeposit = standardDeposit - debt;
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, debt, debt * 10, "fuzz-refund");
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - actualDeposit);
+
+        _approveBidDeposit(bidderB, 11_000 * USDC);
+        _placeAuthorizedBid(LOT_ID, bidderB, 11_000 * USDC, 0, 0, "fuzz-outbid");
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore);
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+    }
+
+    function testFuzzWinnerPaysSameTotalForEveryDepositDebt(uint96 rawDebt) external {
+        uint256 standardDeposit = STARTING_BID / 10;
+        uint256 debt = bound(uint256(rawDebt), 0, standardDeposit);
+        uint256 actualDeposit = standardDeposit - debt;
+        uint256 totalPayment = 11_000 * USDC;
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, debt, debt * 10, "fuzz-winner");
+        vm.prank(bidderA);
+        token.approve(address(auction), totalPayment - actualDeposit);
+        vm.warp(auction.getAuction(LOT_ID).endTime);
+        vm.prank(operator);
+        (,, bool collected) = auction.endAuction(LOT_ID);
+
+        assertTrue(collected);
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - totalPayment);
+        (uint256 totalDebt, uint256 auctionDebt,,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, 0);
+        assertEq(auctionDebt, 0);
+    }
+
+    function testFuzzMaxBidLocksOnlyActualDeposit(uint96 rawDebt) external {
+        uint256 maxBid = 15_000 * USDC;
+        uint256 standardDeposit = maxBid / 10;
+        uint256 debt = bound(uint256(rawDebt), 0, standardDeposit);
+        uint256 actualDeposit = standardDeposit - debt;
+        uint256 bidderBalanceBefore = token.balanceOf(bidderA);
+
+        vm.prank(bidderA);
+        token.approve(address(auction), actualDeposit);
+        _setAuthorizedMax(LOT_ID, bidderA, maxBid, debt, debt * 10, "fuzz-max");
+
+        assertEq(token.balanceOf(bidderA), bidderBalanceBefore - actualDeposit);
+        (uint256 totalDebt, uint256 auctionDebt, uint256 storedStandardDeposit, uint256 storedActualDeposit) =
+            auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(totalDebt, debt);
+        assertEq(auctionDebt, debt);
+        assertEq(storedStandardDeposit, standardDeposit);
+        assertEq(storedActualDeposit, actualDeposit);
+    }
+
     function testWinnerPaymentFailureKeepsDebtAndSuccessfulRetryReleasesIt() external {
         _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, STARTING_BID / 10, STARTING_BID, "winner-deposit-debt");
         uint256 endTime = auction.getAuction(LOT_ID).endTime;
