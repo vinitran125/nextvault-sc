@@ -194,6 +194,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     error InvalidBidAuthorization();
     error DepositDebtLimitExceeded();
     error DepositCannotBeReduced();
+    error ConsignorCannotParticipate();
 
     event AuctionCreated(bytes32 indexed lotId, address indexed nftCollection, uint256 blockTimestamp);
     event AuctionDetailsUpdated(
@@ -617,6 +618,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         _checkWalletCanAct(msg.sender);
         if (!auctionExists[lotId]) revert AuctionNotFound();
         AuctionConfig storage auction = auctions[lotId];
+        _checkNotConsignor(auction.consignor, msg.sender);
 
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
@@ -666,6 +668,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig storage auction = auctions[lotId];
+        _checkNotConsignor(auction.consignor, bidder);
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
         {
             revert AuctionNotActive();
@@ -699,6 +702,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig storage auction = auctions[lotId];
+        _checkNotConsignor(auction.consignor, bidder);
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
         {
             revert AuctionNotActive();
@@ -752,6 +756,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         if (cancelledAuctions[lotId]) revert AuctionIsCancelled();
         AuctionConfig memory auction = auctions[lotId];
+        _checkNotConsignor(auction.consignor, bidder);
         if (_currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime) != AuctionStatus.Active)
         {
             revert AuctionNotActive();
@@ -1308,6 +1313,10 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     function _checkWalletCanAct(address wallet) internal view {
         if (blacklistedWallets[wallet]) revert BlacklistedWallet();
         if (disabledWallets[wallet]) revert DisabledWallet();
+    }
+
+    function _checkNotConsignor(address consignor, address participant) internal pure {
+        if (consignor == participant) revert ConsignorCannotParticipate();
     }
 
     function _currentStatus(uint256 startTime, uint256 previewDurationSeconds, uint256 endTime)
