@@ -255,6 +255,42 @@ contract AuctionPlaceBidTest is Test {
         auction.placeBid(LOT_ID, STARTING_BID);
     }
 
+    function testConsignorWithLegacyPassCannotPlaceBid() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _changeConsignorTo(bidderA);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.ConsignorCannotParticipate.selector);
+        auction.placeBid(LOT_ID, STARTING_BID);
+
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testConsignorWithLegacyPassCannotSetMaxBid() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _changeConsignorTo(bidderA);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        vm.prank(bidderA);
+        vm.expectRevert(Auction.ConsignorCannotParticipate.selector);
+        auction.setMaxBid(LOT_ID, STARTING_BID);
+
+        assertEq(token.balanceOf(address(auction)), NFT_PRICE);
+    }
+
+    function testOperatorCannotAutoBidForConsignorWithLegacyPass() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _changeConsignorTo(bidderA);
+
+        vm.prank(operator);
+        vm.expectRevert(Auction.ConsignorCannotParticipate.selector);
+        auction.placeBidFor(LOT_ID, bidderA, STARTING_BID);
+    }
+
     function testPlaceBidRevertsWhenFirstBidBelowStartingBid() external {
         _createActiveAuction();
         _buyNft(bidderA, 1);
@@ -367,6 +403,11 @@ contract AuctionPlaceBidTest is Test {
     function _approveBidDeposit(address bidder, uint256 bidAmount) private {
         vm.prank(bidder);
         token.approve(address(auction), bidAmount / 10);
+    }
+
+    function _changeConsignorTo(address newConsignor) private {
+        vm.prank(operator);
+        auction.updateAuctionDetails(LOT_ID, newConsignor, LOW_ESTIMATE, HIGH_ESTIMATE, "ipfs://thumbnail");
     }
 
     function _setAuctionTimingConfig(uint256 paymentGracePeriodSeconds_, uint256 antiSnipeWindowSeconds_, bytes32 nonce)

@@ -238,6 +238,28 @@ contract AuctionCreateTest is Test {
         assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Active));
     }
 
+    function testConsignorCannotBuyAuctionPassForOwnAuction() external {
+        Auction.CreateAuctionParams memory params = _defaultParams();
+        params.previewDurationSeconds = 0;
+        bytes32 nonce = _nonce("consignor-buy-pass");
+        uint256 deadline = block.timestamp + 1 hours;
+        auction.createAuction(params, nonce, deadline, _sign(params, nonce, deadline, adminKey));
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        token.mint(consignor, config.nftPrice);
+        vm.prank(consignor);
+        token.approve(address(auction), config.nftPrice);
+
+        vm.prank(consignor);
+        vm.expectRevert(Auction.ConsignorCannotParticipate.selector);
+        auction.buyNFT(LOT_ID, 1);
+
+        assertEq(token.balanceOf(consignor), config.nftPrice);
+        assertEq(token.balanceOf(address(auction)), 0);
+        assertEq(LotNFT(config.nftCollection).balanceOf(consignor), 0);
+        assertEq(LotNFT(config.nftCollection).mintedByWallet(consignor), 0);
+    }
+
     function testBuyNftMintsPendingThenVrfAssignsDesignsFromRemainingPool() external {
         Auction.CreateAuctionParams memory params = _defaultParams();
         params.previewDurationSeconds = 0;
