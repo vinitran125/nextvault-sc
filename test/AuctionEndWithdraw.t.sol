@@ -51,11 +51,7 @@ contract AuctionEndWithdrawTest is Test {
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
     );
     event SettlementConfigUpdated(
-        address indexed treasury,
-        uint256 applicationDepositAmount,
-        uint16 buyerPremiumBps,
-        uint16 sellerCommissionBps,
-        uint256 blockTimestamp
+        address indexed treasury, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
     );
     event AuctionTimingUpdated(
         bytes32 indexed lotId, uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
@@ -131,15 +127,13 @@ contract AuctionEndWithdrawTest is Test {
     }
 
     function testSettlementConfigUsesDefaultsAndCanBeRelayedByWallet() external {
-        assertEq(auction.applicationDepositAmount(), 20 * USDC);
         assertEq(auction.buyerPremiumBps(), 1_000);
         assertEq(auction.sellerCommissionBps(), 1_000);
 
         vm.expectEmit(true, false, false, true, address(auction));
-        emit SettlementConfigUpdated(admin, 50 * USDC, 1_500, 750, block.timestamp);
-        _setSettlementConfig(admin, 50 * USDC, 1_500, 750, keccak256("financial-config"), bidderA);
+        emit SettlementConfigUpdated(admin, 1_500, 750, block.timestamp);
+        _setSettlementConfig(admin, 1_500, 750, keccak256("financial-config"), bidderA);
 
-        assertEq(auction.applicationDepositAmount(), 50 * USDC);
         assertEq(auction.buyerPremiumBps(), 1_500);
         assertEq(auction.sellerCommissionBps(), 750);
 
@@ -150,7 +144,7 @@ contract AuctionEndWithdrawTest is Test {
 
     function testSettlementConfigRejectsInvalidSigner() external {
         Auction.SettlementConfigAuthorization memory authorization =
-            _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("invalid-signer"));
+            _settlementConfigAuthorization(admin, 1_500, 750, keccak256("invalid-signer"));
         bytes memory signature = _signSettlementConfigAuthorization(authorization, strangerKey);
 
         vm.prank(bidderA);
@@ -160,33 +154,29 @@ contract AuctionEndWithdrawTest is Test {
 
     function testSettlementConfigRejectsInvalidValues() external {
         Auction.SettlementConfigAuthorization memory authorization =
-            _settlementConfigAuthorization(address(0), 50 * USDC, 1_500, 750, keccak256("zero-treasury"));
+            _settlementConfigAuthorization(address(0), 1_500, 750, keccak256("zero-treasury"));
         vm.expectRevert(Auction.InvalidSettlementConfig.selector);
         auction.setSettlementConfig(authorization, "");
 
-        authorization = _settlementConfigAuthorization(admin, 0, 1_500, 750, keccak256("zero-deposit"));
+        authorization = _settlementConfigAuthorization(admin, 10_001, 750, keccak256("buyer-premium"));
         vm.expectRevert(Auction.InvalidSettlementConfig.selector);
         auction.setSettlementConfig(authorization, "");
 
-        authorization = _settlementConfigAuthorization(admin, 50 * USDC, 10_001, 750, keccak256("buyer-premium"));
-        vm.expectRevert(Auction.InvalidSettlementConfig.selector);
-        auction.setSettlementConfig(authorization, "");
-
-        authorization = _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 10_001, keccak256("seller-fee"));
+        authorization = _settlementConfigAuthorization(admin, 1_500, 10_001, keccak256("seller-fee"));
         vm.expectRevert(Auction.InvalidSettlementConfig.selector);
         auction.setSettlementConfig(authorization, "");
     }
 
     function testSettlementConfigRejectsExpiredAndReplayedAuthorization() external {
         Auction.SettlementConfigAuthorization memory authorization =
-            _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("expired-config"));
+            _settlementConfigAuthorization(admin, 1_500, 750, keccak256("expired-config"));
         authorization.deadline = block.timestamp - 1;
         bytes memory signature = _signSettlementConfigAuthorization(authorization, operatorKey);
 
         vm.expectRevert(Auction.AuthorizationExpired.selector);
         auction.setSettlementConfig(authorization, signature);
 
-        authorization = _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("replayed-config"));
+        authorization = _settlementConfigAuthorization(admin, 1_500, 750, keccak256("replayed-config"));
         signature = _signSettlementConfigAuthorization(authorization, operatorKey);
         auction.setSettlementConfig(authorization, signature);
 
@@ -196,9 +186,9 @@ contract AuctionEndWithdrawTest is Test {
 
     function testSettlementConfigRejectsModifiedPayload() external {
         Auction.SettlementConfigAuthorization memory authorization =
-            _settlementConfigAuthorization(admin, 50 * USDC, 1_500, 750, keccak256("modified-config"));
+            _settlementConfigAuthorization(admin, 1_500, 750, keccak256("modified-config"));
         bytes memory signature = _signSettlementConfigAuthorization(authorization, operatorKey);
-        authorization.applicationDepositAmount = 60 * USDC;
+        authorization.buyerPremiumBps = 1_600;
 
         vm.expectRevert(Auction.InvalidSigner.selector);
         auction.setSettlementConfig(authorization, signature);
@@ -207,7 +197,7 @@ contract AuctionEndWithdrawTest is Test {
     function testAuctionTermsAreSnapshottedAtCreation() external {
         Auction.AuctionConfig memory original = _createAuction(0);
 
-        _setSettlementConfig(admin, 20 * USDC, 2_000, 500, keccak256("snapshot-existing"), bidderA);
+        _setSettlementConfig(admin, 2_000, 500, keccak256("snapshot-existing"), bidderA);
         _setAuctionTimingConfig(30 minutes, 2 minutes, keccak256("snapshot-existing-timing"), bidderA);
 
         Auction.AuctionConfig memory stored = auction.getAuction(LOT_ID);
@@ -220,7 +210,7 @@ contract AuctionEndWithdrawTest is Test {
     }
 
     function testNewAuctionSnapshotsLatestTimingAndFeeConfig() external {
-        _setSettlementConfig(admin, 20 * USDC, 2_000, 500, keccak256("snapshot-new"), bidderA);
+        _setSettlementConfig(admin, 2_000, 500, keccak256("snapshot-new"), bidderA);
         _setAuctionTimingConfig(30 minutes, 2 minutes, keccak256("snapshot-new-timing"), bidderA);
 
         Auction.AuctionConfig memory config = _createAuction(0);
@@ -331,7 +321,7 @@ contract AuctionEndWithdrawTest is Test {
     function testOperatorCanUpdateSettlementConfigForAuctionsBeforeTheyStart() external {
         _createAuction(1 days);
         _createAuctionFor(LOT_ID_2, 1 days, STARTING_BID);
-        _setSettlementConfig(admin, 50 * USDC, 2_000, 500, keccak256("batch-settlement"), bidderA);
+        _setSettlementConfig(admin, 2_000, 500, keccak256("batch-settlement"), bidderA);
 
         bytes32[] memory lotIds = new bytes32[](2);
         lotIds[0] = LOT_ID;
@@ -424,7 +414,7 @@ contract AuctionEndWithdrawTest is Test {
     function testFeeConfigChangeDoesNotAffectExistingAuctionSettlement() external {
         Auction.AuctionConfig memory config = _createAuction(0);
 
-        _setSettlementConfig(admin, 20 * USDC, 2_000, 500, keccak256("settlement-existing"), bidderA);
+        _setSettlementConfig(admin, 2_000, 500, keccak256("settlement-existing"), bidderA);
 
         _buyNftAndPlaceManualBid(bidderA, STARTING_BID);
         _approveRemainingPayment(bidderA, STARTING_BID);
@@ -1379,16 +1369,13 @@ contract AuctionEndWithdrawTest is Test {
 
     function _setSettlementConfig(
         address treasury_,
-        uint256 applicationDepositAmount_,
         uint16 buyerPremiumBps_,
         uint16 sellerCommissionBps_,
         bytes32 nonce,
         address relayer
     ) private {
         Auction.SettlementConfigAuthorization memory authorization =
-            _settlementConfigAuthorization(
-                treasury_, applicationDepositAmount_, buyerPremiumBps_, sellerCommissionBps_, nonce
-            );
+            _settlementConfigAuthorization(treasury_, buyerPremiumBps_, sellerCommissionBps_, nonce);
         bytes memory signature = _signSettlementConfigAuthorization(authorization, operatorKey);
 
         vm.prank(relayer);
@@ -1397,14 +1384,12 @@ contract AuctionEndWithdrawTest is Test {
 
     function _settlementConfigAuthorization(
         address treasury_,
-        uint256 applicationDepositAmount_,
         uint16 buyerPremiumBps_,
         uint16 sellerCommissionBps_,
         bytes32 nonce
     ) private view returns (Auction.SettlementConfigAuthorization memory) {
         return Auction.SettlementConfigAuthorization({
             treasury: treasury_,
-            applicationDepositAmount: applicationDepositAmount_,
             buyerPremiumBps: buyerPremiumBps_,
             sellerCommissionBps: sellerCommissionBps_,
             nonce: nonce,
@@ -1419,10 +1404,9 @@ contract AuctionEndWithdrawTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 keccak256(
-                    "SettlementConfigAuthorization(address treasury,uint256 applicationDepositAmount,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
+                    "SettlementConfigAuthorization(address treasury,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
                 ),
                 authorization.treasury,
-                authorization.applicationDepositAmount,
                 authorization.buyerPremiumBps,
                 authorization.sellerCommissionBps,
                 authorization.nonce,

@@ -17,19 +17,16 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     uint256 internal constant BPS_DENOMINATOR = 10_000;
     uint16 internal constant DEFAULT_BUYER_PREMIUM_BPS = 1_000;
     uint16 internal constant DEFAULT_SELLER_COMMISSION_BPS = 1_000;
-    uint256 internal constant DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT = 20;
     uint256 internal constant DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS = 1 hours;
     uint256 internal constant DEFAULT_ANTI_SNIPE_WINDOW_SECONDS = 5 minutes;
     uint256 private constant MAX_AUCTION_CONFIG_UPDATE_BATCH_SIZE = 10;
     string internal constant NFT_COLLECTION_NAME = "NextVault Auctions";
     string internal constant NFT_COLLECTION_SYMBOL = "NV";
-    bytes32 internal constant CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH =
-        keccak256("ConsignmentDepositAuthorization(bytes32 itemId,address consignor,bytes32 nonce,uint256 deadline)");
     bytes32 public constant CREATE_AUCTION_AUTHORIZATION_TYPEHASH = keccak256(
         "CreateAuctionAuthorization(bytes32 lotId,address consignor,uint256 lowEstimate,uint256 highEstimate,uint256 startingBid,uint256 previewDurationSeconds,uint256 auctionDurationSeconds,uint256 variant1Quantity,uint256 variant2Quantity,uint256 variant3Quantity,uint256 nftPriceRatioBps,string nftName,string nftSymbol,string thumbnailUrl,string metadataUri,bytes32 nonce,uint256 deadline)"
     );
     bytes32 internal constant SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
-        "SettlementConfigAuthorization(address treasury,uint256 applicationDepositAmount,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
+        "SettlementConfigAuthorization(address treasury,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
     );
     bytes32 internal constant AUCTION_TIMING_CONFIG_AUTHORIZATION_TYPEHASH = keccak256(
         "AuctionTimingConfigAuthorization(uint256 paymentGracePeriodSeconds,uint256 antiSnipeWindowSeconds,bytes32 nonce,uint256 deadline)"
@@ -92,13 +89,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         bool activeMaxBid;
     }
 
-    enum ItemDepositStatus {
-        None,
-        Deposited,
-        Cancelled,
-        Refunded
-    }
-
     enum BidType {
         Manual,
         Maximum
@@ -120,16 +110,8 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         mapping(bytes32 => uint256) debtByAuction;
     }
 
-    struct ConsignmentDepositAuthorization {
-        bytes32 itemId;
-        address consignor;
-        bytes32 nonce;
-        uint256 deadline;
-    }
-
     struct SettlementConfigAuthorization {
         address treasury;
-        uint256 applicationDepositAmount;
         uint16 buyerPremiumBps;
         uint16 sellerCommissionBps;
         bytes32 nonce;
@@ -180,9 +162,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     error InvalidNftCollection();
     error AuthorizationExpired();
     error NonceAlreadyUsed();
-    error ConsignmentDepositAlreadyExists();
-    error InvalidItemDepositStatus();
-    error UnauthorizedConsignmentDepositCancel();
     error InvalidSettlementConfig();
     error InvalidAuctionTimingConfig();
     error AuctionPaymentGracePeriodActive(uint256 deadline);
@@ -213,11 +192,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         bytes32 indexed lotId, address indexed winner, uint256 winningBid, bool paymentCollected, uint256 blockTimestamp
     );
     event SettlementConfigUpdated(
-        address indexed treasury,
-        uint256 applicationDepositAmount,
-        uint16 buyerPremiumBps,
-        uint16 sellerCommissionBps,
-        uint256 blockTimestamp
+        address indexed treasury, uint16 buyerPremiumBps, uint16 sellerCommissionBps, uint256 blockTimestamp
     );
     event AuctionTimingConfigUpdated(
         uint256 paymentGracePeriodSeconds, uint256 antiSnipeWindowSeconds, uint256 blockTimestamp
@@ -283,15 +258,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         uint8 variant,
         uint256 blockTimestamp
     );
-    event ConsignmentDepositCreated(
-        bytes32 indexed itemId, address indexed consignor, address indexed token, uint256 amount, uint256 blockTimestamp
-    );
-    event ConsignmentDepositCancelled(
-        bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, uint256 blockTimestamp
-    );
-    event ConsignmentDepositRefunded(
-        bytes32 indexed itemId, address indexed consignor, uint256 refundAmount, bool isApproved, uint256 blockTimestamp
-    );
     event WalletBlacklistUpdated(address indexed wallet, bool blacklisted, uint256 blockTimestamp);
     event WalletDisabledUpdated(address indexed wallet, bool disabled, uint256 blockTimestamp);
     event BidAuthorizationRequirementUpdated(bool required, uint256 blockTimestamp);
@@ -312,10 +278,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     mapping(bytes32 => AuctionConfig) private auctions;
     mapping(bytes32 => bool) public auctionExists;
     mapping(bytes32 => bool) public cancelledAuctions;
-
-    mapping(bytes32 => address) private itemDepositConsignor;
-    mapping(bytes32 => uint256) private itemDepositAmount;
-    mapping(bytes32 => ItemDepositStatus) private itemDepositStatus;
 
     mapping(bytes32 => bool) public usedNonces;
     mapping(bytes32 => bool) public endedAuctions;
@@ -340,7 +302,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
     uint256 public paymentGracePeriodSeconds;
     uint256 public antiSnipeWindowSeconds;
     mapping(bytes32 => uint256) public auctionPaymentDeadline;
-    uint256 public applicationDepositAmount;
     mapping(address => bool) public disabledWallets;
     bool public bidAuthorizationRequired;
 
@@ -370,7 +331,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         treasury = admin;
         buyerPremiumBps = DEFAULT_BUYER_PREMIUM_BPS;
         sellerCommissionBps = DEFAULT_SELLER_COMMISSION_BPS;
-        applicationDepositAmount = DEFAULT_APPLICATION_DEPOSIT_TOKEN_AMOUNT * tokenDecimal;
         paymentGracePeriodSeconds = DEFAULT_PAYMENT_GRACE_PERIOD_SECONDS;
         antiSnipeWindowSeconds = DEFAULT_ANTI_SNIPE_WINDOW_SECONDS;
         bidAuthorizationRequired = true;
@@ -384,8 +344,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         external
     {
         if (
-            authorization.treasury == address(0) || authorization.applicationDepositAmount == 0
-                || authorization.buyerPremiumBps > BPS_DENOMINATOR
+            authorization.treasury == address(0) || authorization.buyerPremiumBps > BPS_DENOMINATOR
                 || authorization.sellerCommissionBps > BPS_DENOMINATOR
         ) revert InvalidSettlementConfig();
 
@@ -394,16 +353,11 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         );
 
         treasury = authorization.treasury;
-        applicationDepositAmount = authorization.applicationDepositAmount;
         buyerPremiumBps = authorization.buyerPremiumBps;
         sellerCommissionBps = authorization.sellerCommissionBps;
 
         emit SettlementConfigUpdated(
-            authorization.treasury,
-            authorization.applicationDepositAmount,
-            authorization.buyerPremiumBps,
-            authorization.sellerCommissionBps,
-            block.timestamp
+            authorization.treasury, authorization.buyerPremiumBps, authorization.sellerCommissionBps, block.timestamp
         );
     }
 
@@ -1033,50 +987,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         emit NFTVariantUpdated(lotId, msg.sender, tokenId, variant, block.timestamp);
     }
 
-    function depositConsignment(ConsignmentDepositAuthorization calldata authorization, bytes calldata signature)
-        external
-    {
-        _checkWalletCanAct(msg.sender);
-        if (authorization.consignor == address(0) || authorization.consignor != msg.sender) revert InvalidConsignor();
-        if (itemDepositStatus[authorization.itemId] != ItemDepositStatus.None) {
-            revert ConsignmentDepositAlreadyExists();
-        }
-
-        _validateOperatorAuthorization(
-            _hashConsignmentDepositAuthorization(authorization), authorization.nonce, authorization.deadline, signature
-        );
-        uint256 amount = applicationDepositAmount;
-        itemDepositAmount[authorization.itemId] = amount;
-        itemDepositConsignor[authorization.itemId] = msg.sender;
-        itemDepositStatus[authorization.itemId] = ItemDepositStatus.Deposited;
-
-        token.safeTransferFrom(msg.sender, address(this), amount);
-
-        emit ConsignmentDepositCreated(authorization.itemId, msg.sender, address(token), amount, block.timestamp);
-    }
-
-    function cancelConsignmentDeposit(bytes32 itemId) external {
-        if (itemDepositStatus[itemId] != ItemDepositStatus.Deposited) revert InvalidItemDepositStatus();
-        if (itemDepositConsignor[itemId] != msg.sender) revert UnauthorizedConsignmentDepositCancel();
-
-        uint256 amount = itemDepositAmount[itemId];
-        itemDepositStatus[itemId] = ItemDepositStatus.Cancelled;
-        token.safeTransfer(msg.sender, amount);
-
-        emit ConsignmentDepositCancelled(itemId, msg.sender, amount, block.timestamp);
-    }
-
-    function refundConsignmentDeposit(bytes32 itemId, bool isApproved) external onlyRole(OPERATOR_ROLE) {
-        if (itemDepositStatus[itemId] != ItemDepositStatus.Deposited) revert InvalidItemDepositStatus();
-
-        address consignor = itemDepositConsignor[itemId];
-        uint256 amount = itemDepositAmount[itemId];
-        itemDepositStatus[itemId] = ItemDepositStatus.Refunded;
-        token.safeTransfer(consignor, amount);
-
-        emit ConsignmentDepositRefunded(itemId, consignor, amount, isApproved, block.timestamp);
-    }
-
     function getAuction(bytes32 lotId) external view returns (AuctionConfig memory) {
         if (!auctionExists[lotId]) revert AuctionNotFound();
         return auctions[lotId];
@@ -1095,24 +1005,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         }
         return
             _currentStatus(auctions[lotId].startTime, auctions[lotId].previewDurationSeconds, auctions[lotId].endTime);
-    }
-
-    function _hashConsignmentDepositAuthorization(ConsignmentDepositAuthorization calldata authorization)
-        internal
-        pure
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                CONSIGNMENT_DEPOSIT_AUTHORIZATION_TYPEHASH,
-                authorization.itemId,
-                authorization.consignor,
-                authorization.nonce,
-                authorization.deadline
-            )
-        );
-
-        return structHash;
     }
 
     function _hashCreateAuctionAuthorization(CreateAuctionParams calldata params, bytes32 nonce, uint256 deadline)
@@ -1155,7 +1047,6 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
             abi.encode(
                 SETTLEMENT_CONFIG_AUTHORIZATION_TYPEHASH,
                 authorization.treasury,
-                authorization.applicationDepositAmount,
                 authorization.buyerPremiumBps,
                 authorization.sellerCommissionBps,
                 authorization.nonce,
