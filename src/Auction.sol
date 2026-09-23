@@ -629,6 +629,15 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         }
         if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
 
+        // A leader cannot raise the visible price against themselves. Treat any
+        // valid ladder amount they submit through the manual entry point as a
+        // maximum bid and leave the current bid unchanged until a competitor
+        // challenges it.
+        if (itemToCurrentBidder[lotId] == bidder) {
+            _setMaxBid(lotId, bidder, amount, newDebt, biddingLimit, enforceDebtLimit);
+            return;
+        }
+
         uint256 currentBid = itemToCurrentBid[lotId];
         uint256 expectedBid = currentBid == 0 ? auction.startingBid : currentBid + _bidIncrementFor(currentBid);
         if (amount != expectedBid) revert InvalidBidAmount();
