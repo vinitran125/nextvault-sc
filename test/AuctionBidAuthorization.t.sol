@@ -73,6 +73,31 @@ contract AuctionBidAuthorizationTest is Test {
         assertEq(token.balanceOf(address(auction)), NFT_PRICE * 2 + STARTING_BID / 10);
     }
 
+    function testAuthorizedHighestBidderManualBidBecomesMaximumBid() external {
+        _approveBidDeposit(bidderA, STARTING_BID);
+        _placeAuthorizedBid(LOT_ID, bidderA, STARTING_BID, 0, 0, "leader-current");
+
+        uint256 nextBid = 11_000 * USDC;
+        Auction.BidAuthorization memory authorization =
+            _authorization(bidderA, nextBid, Auction.BidType.Manual, "leader-next");
+        bytes memory signature = _signBidAuthorization(authorization, ADMIN_KEY);
+        _approveBidDeposit(bidderA, nextBid);
+
+        vm.prank(bidderA);
+        auction.placeBid(authorization, signature);
+
+        (,, uint256 standardDeposit,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(standardDeposit, nextBid / 10);
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        vm.warp(config.endTime);
+        vm.prank(operator);
+        (address winner, uint256 winningBid,) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, STARTING_BID);
+    }
+
     function testManualBidRejectsAmountChangedAfterSigning() external {
         Auction.BidAuthorization memory authorization =
             _authorization(bidderA, STARTING_BID, Auction.BidType.Manual, "tampered-amount");
