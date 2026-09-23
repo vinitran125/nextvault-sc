@@ -43,6 +43,9 @@ contract AuctionPlaceBidTest is Test {
     );
     event AuctionExtended(bytes32 indexed lotId, uint256 newEndTime);
     event BidRefunded(bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 blockTimestamp);
+    event MaxBidSet(
+        bytes32 indexed lotId, address indexed bidder, uint256 amount, uint256 depositAmount, uint256 blockTimestamp
+    );
 
     function setUp() external {
         token = new FakeUSDC();
@@ -205,6 +208,60 @@ contract AuctionPlaceBidTest is Test {
         assertEq(token.balanceOf(bidderA), STARTING_BALANCE - NFT_PRICE);
         assertEq(token.balanceOf(bidderB), STARTING_BALANCE - NFT_PRICE - nextBid / 10);
         assertEq(token.balanceOf(address(auction)), NFT_PRICE * 2 + nextBid / 10);
+    }
+
+    function testHighestBidderNextBidBecomesMaxBidWithoutRaisingCurrentBid() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, STARTING_BID);
+
+        uint256 nextBid = 11_000 * USDC;
+        _approveBidDeposit(bidderA, nextBid);
+
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit MaxBidSet(LOT_ID, bidderA, nextBid, nextBid / 10, block.timestamp);
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, nextBid);
+
+        (,, uint256 standardDeposit,) = auction.getBidDepositDebt(LOT_ID, bidderA);
+        assertEq(standardDeposit, nextBid / 10);
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        vm.warp(config.endTime);
+        vm.prank(operator);
+        (address winner, uint256 winningBid,) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, STARTING_BID);
+    }
+
+    function testHighestBidderMaxBidCanDefendAtTheSameAmount() external {
+        _createActiveAuction();
+        _buyNft(bidderA, 1);
+        _approveBidDeposit(bidderA, STARTING_BID);
+
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, STARTING_BID);
+
+        uint256 nextBid = 11_000 * USDC;
+        _approveBidDeposit(bidderA, nextBid);
+        vm.prank(bidderA);
+        auction.placeBid(LOT_ID, nextBid);
+
+        vm.prank(operator);
+        auction.placeBidFor(LOT_ID, bidderA, nextBid);
+
+        Auction.AuctionConfig memory config = auction.getAuction(LOT_ID);
+        vm.warp(config.endTime);
+        vm.prank(operator);
+        (address winner, uint256 winningBid,) = auction.endAuction(LOT_ID);
+
+        assertEq(winner, bidderA);
+        assertEq(winningBid, nextBid);
     }
 
     function testPlaceBidRevertsWhenAuctionMissing() external {
