@@ -946,11 +946,10 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         if (cancelledAuctions[lotId]) revert AuctionAlreadyCancelled();
 
         AuctionConfig memory auction = auctions[lotId];
-        if (
-            endedAuctions[lotId]
-                || _currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime)
-                    != AuctionStatus.Active
-        ) revert AuctionNotActive();
+        AuctionStatus status = _currentStatus(auction.startTime, auction.previewDurationSeconds, auction.endTime);
+        if (endedAuctions[lotId] || (status != AuctionStatus.Preview && status != AuctionStatus.Active)) {
+            revert AuctionNotActive();
+        }
 
         cancelledAuctions[lotId] = true;
 
