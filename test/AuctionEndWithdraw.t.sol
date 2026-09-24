@@ -1247,12 +1247,20 @@ contract AuctionEndWithdrawTest is Test {
         vm.stopPrank();
     }
 
-    function testWithdrawRevertsDuringPreview() external {
-        _createAuction(1 hours);
+    function testWithdrawDuringPreviewRemainsCancelledAfterStartTime() external {
+        Auction.AuctionConfig memory config = _createAuction(1 hours);
 
+        assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Preview));
+        vm.expectEmit(true, true, false, true, address(auction));
+        emit AuctionWithdrawn(LOT_ID, address(0), block.timestamp);
         vm.prank(operator);
-        vm.expectRevert(Auction.AuctionNotActive.selector);
         auction.withdrawAuction(LOT_ID);
+
+        assertTrue(auction.cancelledAuctions(LOT_ID));
+        assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Cancelled));
+
+        vm.warp(config.startTime);
+        assertEq(uint256(auction.currentStatus(LOT_ID)), uint256(Auction.AuctionStatus.Cancelled));
     }
 
     function testWithdrawRevertsAtOrAfterEndTimestamp() external {
