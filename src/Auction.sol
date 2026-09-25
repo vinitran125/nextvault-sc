@@ -634,7 +634,7 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         // maximum bid and leave the current bid unchanged until a competitor
         // challenges it.
         if (itemToCurrentBidder[lotId] == bidder) {
-            _setMaxBid(lotId, bidder, amount, newDebt, biddingLimit, enforceDebtLimit);
+            _applyMaxBid(lotId, bidder, amount, newDebt, biddingLimit, enforceDebtLimit);
             return;
         }
 
@@ -726,7 +726,18 @@ contract Auction is AccessControlUpgradeable, UUPSUpgradeable {
         }
         if (LotNFT(auction.nftCollection).balanceOf(bidder) == 0) revert NotEligibleToBid();
 
-        _validateBidOnLadder(lotId, auction.startingBid, amount);
+        _applyMaxBid(lotId, bidder, amount, newDebt, biddingLimit, enforceDebtLimit);
+    }
+
+    function _applyMaxBid(
+        bytes32 lotId,
+        address bidder,
+        uint256 amount,
+        uint256 newDebt,
+        uint256 biddingLimit,
+        bool enforceDebtLimit
+    ) internal {
+        _validateBidOnLadder(lotId, auctions[lotId].startingBid, amount);
 
         if (itemToCurrentBid[lotId] > amount) revert InvalidBidAmount();
 
