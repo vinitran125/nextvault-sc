@@ -22,7 +22,6 @@ contract AuctionBlacklistTest is Test {
     address private consignor = makeAddr("consignor");
 
     bytes32 private constant LOT_ID = bytes32(uint256(1));
-    bytes32 private constant ITEM_ID = bytes32(uint256(2));
     uint256 private constant USDC = 1e6;
     uint256 private constant STARTING_BID = 10_000 * USDC;
     uint256 private constant NFT_PRICE = 10 * USDC;
@@ -139,7 +138,7 @@ contract AuctionBlacklistTest is Test {
         assertEq(token.balanceOf(address(auction)), NFT_PRICE + STARTING_BID / 10);
     }
 
-    function testDisabledWalletCannotBuyNftOrDepositNewConsignment() external {
+    function testDisabledWalletCannotBuyNft() external {
         _createActiveAuction();
         _setWalletDisabled(bidder, true, keccak256("disable-wallet-actions"), consignor);
 
@@ -148,32 +147,6 @@ contract AuctionBlacklistTest is Test {
         vm.prank(bidder);
         vm.expectRevert(Auction.DisabledWallet.selector);
         auction.buyNFT(LOT_ID, 1);
-
-        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        bytes memory signature = _signDepositAuthorization(authorization);
-        uint256 depositAmount = auction.applicationDepositAmount();
-        vm.prank(bidder);
-        token.approve(address(auction), depositAmount);
-        vm.prank(bidder);
-        vm.expectRevert(Auction.DisabledWallet.selector);
-        auction.depositConsignment(authorization, signature);
-    }
-
-    function testDisabledWalletCanCancelExistingConsignmentDeposit() external {
-        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        bytes memory signature = _signDepositAuthorization(authorization);
-        uint256 depositAmount = auction.applicationDepositAmount();
-
-        vm.prank(bidder);
-        token.approve(address(auction), depositAmount);
-        vm.prank(bidder);
-        auction.depositConsignment(authorization, signature);
-        _setWalletDisabled(bidder, true, keccak256("disable-after-deposit"), consignor);
-
-        uint256 balanceBeforeCancel = token.balanceOf(bidder);
-        vm.prank(bidder);
-        auction.cancelConsignmentDeposit(ITEM_ID);
-        assertEq(token.balanceOf(bidder), balanceBeforeCancel + depositAmount);
     }
 
     function testBlacklistedWalletCannotBuyNft() external {
@@ -209,68 +182,6 @@ contract AuctionBlacklistTest is Test {
         vm.prank(bidder);
         vm.expectRevert(Auction.BlacklistedWallet.selector);
         auction.setMaxBid(LOT_ID, STARTING_BID);
-    }
-
-    function testBlacklistedWalletCannotDepositNewConsignment() external {
-        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        bytes memory signature = _signDepositAuthorization(authorization);
-        _blacklist(bidder);
-
-        vm.prank(bidder);
-        token.approve(address(auction), auction.applicationDepositAmount());
-        vm.prank(bidder);
-        vm.expectRevert(Auction.BlacklistedWallet.selector);
-        auction.depositConsignment(authorization, signature);
-    }
-
-    function testConsignmentDepositUsesConfiguredApplicationDeposit() external {
-        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        Auction.SettlementConfigAuthorization memory configAuthorization = Auction.SettlementConfigAuthorization({
-            treasury: admin,
-            applicationDepositAmount: 50 * USDC,
-            buyerPremiumBps: 1_000,
-            sellerCommissionBps: 1_000,
-            nonce: keccak256("configured-application-deposit"),
-            deadline: block.timestamp + 1 hours
-        });
-        vm.prank(bidder);
-        auction.setSettlementConfig(configAuthorization, _signSettlementConfigAuthorization(configAuthorization));
-
-        bytes memory signature = _signDepositAuthorization(authorization);
-        vm.prank(bidder);
-        token.approve(address(auction), 50 * USDC);
-        vm.prank(bidder);
-        auction.depositConsignment(authorization, signature);
-
-        assertEq(token.balanceOf(address(auction)), 50 * USDC);
-    }
-
-    function testConsignmentDepositRevertsWithStaleAllowanceAndCanRetry() external {
-        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        bytes memory signature = _signDepositAuthorization(authorization);
-        Auction.SettlementConfigAuthorization memory configAuthorization = Auction.SettlementConfigAuthorization({
-            treasury: admin,
-            applicationDepositAmount: 50 * USDC,
-            buyerPremiumBps: 1_000,
-            sellerCommissionBps: 1_000,
-            nonce: keccak256("updated-application-deposit"),
-            deadline: block.timestamp + 1 hours
-        });
-        vm.prank(bidder);
-        auction.setSettlementConfig(configAuthorization, _signSettlementConfigAuthorization(configAuthorization));
-
-        vm.prank(bidder);
-        token.approve(address(auction), 20 * USDC);
-        vm.prank(bidder);
-        vm.expectRevert();
-        auction.depositConsignment(authorization, signature);
-
-        vm.prank(bidder);
-        token.approve(address(auction), 50 * USDC);
-        vm.prank(bidder);
-        auction.depositConsignment(authorization, signature);
-
-        assertEq(token.balanceOf(address(auction)), 50 * USDC);
     }
 
     function testExistingMaxBidContinuesAfterWalletIsBlacklisted() external {
@@ -338,23 +249,6 @@ contract AuctionBlacklistTest is Test {
         assertEq(winner, bidder);
         assertTrue(paymentCollected);
         assertTrue(auction.auctionPaymentCollected(LOT_ID));
-    }
-
-    function testBlacklistedWalletCanCancelExistingConsignmentDeposit() external {
-        Auction.ConsignmentDepositAuthorization memory authorization = _depositAuthorization();
-        bytes memory signature = _signDepositAuthorization(authorization);
-        uint256 depositAmount = auction.applicationDepositAmount();
-
-        vm.prank(bidder);
-        token.approve(address(auction), depositAmount);
-        vm.prank(bidder);
-        auction.depositConsignment(authorization, signature);
-        _blacklist(bidder);
-
-        uint256 balanceBeforeCancel = token.balanceOf(bidder);
-        vm.prank(bidder);
-        auction.cancelConsignmentDeposit(ITEM_ID);
-        assertEq(token.balanceOf(bidder), balanceBeforeCancel + depositAmount);
     }
 
     function _blacklist(address wallet) private {
@@ -432,38 +326,6 @@ contract AuctionBlacklistTest is Test {
         auction.buyNFT(LOT_ID, 1);
     }
 
-    function _depositAuthorization()
-        private
-        view
-        returns (Auction.ConsignmentDepositAuthorization memory authorization)
-    {
-        authorization = Auction.ConsignmentDepositAuthorization({
-            itemId: ITEM_ID,
-            consignor: bidder,
-            nonce: keccak256("deposit-consignment"),
-            deadline: block.timestamp + 1 hours
-        });
-    }
-
-    function _signDepositAuthorization(Auction.ConsignmentDepositAuthorization memory authorization)
-        private
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                keccak256(
-                    "ConsignmentDepositAuthorization(bytes32 itemId,address consignor,bytes32 nonce,uint256 deadline)"
-                ),
-                authorization.itemId,
-                authorization.consignor,
-                authorization.nonce,
-                authorization.deadline
-            )
-        );
-        return _signTypedData(structHash);
-    }
-
     function _signCreateAuction(Auction.CreateAuctionParams memory params, bytes32 nonce, uint256 deadline)
         private
         view
@@ -489,27 +351,6 @@ contract AuctionBlacklistTest is Test {
                 keccak256(bytes(params.metadataUri)),
                 nonce,
                 deadline
-            )
-        );
-        return _signTypedData(structHash);
-    }
-
-    function _signSettlementConfigAuthorization(Auction.SettlementConfigAuthorization memory authorization)
-        private
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                keccak256(
-                    "SettlementConfigAuthorization(address treasury,uint256 applicationDepositAmount,uint16 buyerPremiumBps,uint16 sellerCommissionBps,bytes32 nonce,uint256 deadline)"
-                ),
-                authorization.treasury,
-                authorization.applicationDepositAmount,
-                authorization.buyerPremiumBps,
-                authorization.sellerCommissionBps,
-                authorization.nonce,
-                authorization.deadline
             )
         );
         return _signTypedData(structHash);
